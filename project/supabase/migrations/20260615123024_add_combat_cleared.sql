@@ -1,0 +1,1 @@
+ALTER TABLE game_saves ADD COLUMN IF NOT EXISTS combat_cleared boolean NOT NULL DEFAULT false;
