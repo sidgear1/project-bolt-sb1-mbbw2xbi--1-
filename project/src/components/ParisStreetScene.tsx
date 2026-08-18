@@ -8,6 +8,7 @@ import CommandPanel from './CommandPanel';
 import FemmeDuMarcheDialogue from './FemmeDuMarcheDialogue';
 import { englishTerm } from '../learningLanguage';
 import { useLanguage } from '../i18n';
+import { assetUrl } from '../utils/assetUrl';
 
 interface ParisStreetSceneProps {
   playerLevel: number;
@@ -120,6 +121,19 @@ export default function ParisStreetScene({
     return () => window.removeEventListener('keydown', handler);
   }, [cancel, onMoveOn]);
 
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      event.preventDefault();
+      cancel();
+      onMoveOn();
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [cancel, onMoveOn]);
+
   const handleHotspotClick = useCallback((hotspot: HotspotData) => {
     cancel();
     setNarrative(null);
@@ -175,7 +189,7 @@ export default function ParisStreetScene({
       >
         {/* Scene image */}
         <img
-          src="/Gemini_Generated_Image_a625ema625ema625.png"
+          src={assetUrl('Gemini_Generated_Image_a625ema625ema625.png')}
           onError={(e) => { (e.target as HTMLImageElement).src = 'https://images.pexels.com/photos/8248092/pexels-photo-8248092.jpeg?auto=compress&cs=tinysrgb&w=1920'; (e.target as HTMLImageElement).onerror = null; }}
           alt="Florence street"
           className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
@@ -189,7 +203,7 @@ export default function ParisStreetScene({
             {/* Title + phase */}
             <div className="min-w-0">
               <h1 className="text-[#e8d5a3] text-base font-bold font-display leading-none">
-                Memorie Perdute
+                TaleTalk
               </h1>
               <div className="text-[#c4b080] text-xs uppercase tracking-widest mt-0.5">
                 {isChinese ? '佛罗伦萨街道 · 场景 3' : 'Florence Street · Scene 3'}

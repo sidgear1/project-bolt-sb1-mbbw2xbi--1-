@@ -198,6 +198,17 @@ export default function WordUnlockPuzzle({
     onSpeak(fullName);
   };
 
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      onAddToDictionary(hotspot.frenchName, hotspot.english);
+      onComplete(100);
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [hotspot, onAddToDictionary, onComplete]);
+
   return (
     <div className="absolute bottom-0 left-0 right-0 z-30" style={{ maxHeight: '60%' }}>
       <div className="bg-[#0a0604]/96 border-t border-[#8b6914]/30 backdrop-blur-md">

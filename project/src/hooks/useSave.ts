@@ -3,6 +3,10 @@ import { supabase } from '../lib/supabase';
 import { SaveData, GamePhase } from '../types';
 
 const SESSION_KEY = 'memoire_perdue_session';
+const ACTIVE_SLOT_KEY = 'taletalk_active_save_slot';
+const slotKey = (slot: number) => `taletalk-save-slot-${slot}`;
+
+export interface SaveSlot { slot: number; name: string | null; avatar: string | null; updatedAt: string | null; phase: GamePhase | null; }
 
 function getSessionId(): string {
   let id = localStorage.getItem(SESSION_KEY);
@@ -14,8 +18,21 @@ function getSessionId(): string {
 }
 
 export function useSave() {
+  const getActiveSlot = () => Number(localStorage.getItem(ACTIVE_SLOT_KEY) ?? '1');
+  const selectSlot = useCallback((slot: number) => { localStorage.setItem(ACTIVE_SLOT_KEY, String(Math.min(6, Math.max(1, slot)))); }, []);
+  const listSlots = useCallback((): SaveSlot[] => Array.from({ length: 6 }, (_, index) => {
+    const slot = index + 1;
+    try { const saved = JSON.parse(localStorage.getItem(slotKey(slot)) ?? 'null') as (SaveData & { name?: string; avatar?: string; updatedAt?: string }) | null; return { slot, name: saved?.name ?? null, avatar: saved?.avatar ?? null, updatedAt: saved?.updatedAt ?? null, phase: saved?.phase ?? null }; } catch { return { slot, name: null, avatar: null, updatedAt: null, phase: null }; }
+  }), []);
+  const nameSlot = useCallback((slot: number, name: string, avatar: string | null) => { const previous = JSON.parse(localStorage.getItem(slotKey(slot)) ?? '{}'); localStorage.setItem(slotKey(slot), JSON.stringify({ ...previous, name, avatar, updatedAt: new Date().toISOString() })); }, []);
+  const removeSlot = useCallback((slot: number) => localStorage.removeItem(slotKey(slot)), []);
   const save = useCallback(async (data: SaveData) => {
     try {
+      const previous = JSON.parse(localStorage.getItem(slotKey(getActiveSlot())) ?? '{}');
+      localStorage.setItem(slotKey(getActiveSlot()), JSON.stringify({ ...data, name: previous.name, avatar: previous.avatar, updatedAt: new Date().toISOString() }));
+      // The older cloud row has one session id, so reserve it for the legacy
+      // first save only. Slots 2–6 must never read/write another slot's state.
+      if (!supabase || getActiveSlot() !== 1) return;
       const sessionId = getSessionId();
       await supabase.from('game_saves').upsert(
         {
@@ -38,6 +55,11 @@ export function useSave() {
 
   const load = useCallback(async (): Promise<SaveData | null> => {
     try {
+      const rawLocalSave = localStorage.getItem(slotKey(getActiveSlot()));
+      const localSave = JSON.parse(rawLocalSave ?? 'null') as SaveData | null;
+      if (localSave?.phase) return localSave;
+      if (rawLocalSave) return null;
+      if (!supabase || getActiveSlot() !== 1) return null;
       const sessionId = localStorage.getItem(SESSION_KEY);
       if (!sessionId) return null;
 
@@ -64,6 +86,10 @@ export function useSave() {
   }, []);
 
   const deleteSave = useCallback(async () => {
+    const previous = JSON.parse(localStorage.getItem(slotKey(getActiveSlot())) ?? '{}');
+    if (previous.name || previous.avatar) localStorage.setItem(slotKey(getActiveSlot()), JSON.stringify({ name: previous.name, avatar: previous.avatar, updatedAt: new Date().toISOString() }));
+    else localStorage.removeItem(slotKey(getActiveSlot()));
+    if (!supabase || getActiveSlot() !== 1) return;
     const sessionId = localStorage.getItem(SESSION_KEY);
     if (!sessionId) return;
     await supabase.from('game_saves').delete().eq('session_id', sessionId);
@@ -71,6 +97,8 @@ export function useSave() {
 
   const hasSave = useCallback(async (): Promise<boolean> => {
     try {
+      if (localStorage.getItem(slotKey(getActiveSlot()))) return true;
+      if (!supabase || getActiveSlot() !== 1) return false;
       const sessionId = localStorage.getItem(SESSION_KEY);
       if (!sessionId) return false;
       const { data } = await supabase
@@ -84,5 +112,5 @@ export function useSave() {
     }
   }, []);
 
-  return { save, load, deleteSave, hasSave };
+  return { save, load, deleteSave, hasSave, selectSlot, listSlots, nameSlot, removeSlot, getActiveSlot };
 }

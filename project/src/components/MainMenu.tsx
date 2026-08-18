@@ -9,15 +9,17 @@ import { useSpeech } from '../hooks/useSpeech';
 import { useLanguage } from '../i18n';
 import DebugOverlayPanel from './DebugOverlayPanel';
 import BackyardAdventure from './BackyardAdventure';
+import { BusTicketAdventure, HomeAdventure, SoccerMatchAdventure } from './ElderwoodAdventures';
 import { isSkipAnswer, levenshtein, stripAccents } from '../utils/levenshtein';
+import { assetUrl } from '../utils/assetUrl';
+import type { GamePhase } from '../types';
 
-export type HubSection = 'home' | 'world' | 'roam' | 'backyard' | 'shop' | 'market' | 'adventure' | 'revision' | 'multiplayer' | 'settings';
+export type HubSection = 'home' | 'world' | 'roam' | 'backyard' | 'shop' | 'market' | 'bus' | 'family-home' | 'soccer-match' | 'adventure' | 'revision' | 'multiplayer' | 'settings';
 
 interface MainMenuProps {
   onNewGame: () => void;
   onContinue: () => void;
   onStartAudio: () => void;
-  onStopAudio: () => void;
 }
 
 const navItems: Array<{ id: Exclude<HubSection, 'home'>; label: string; labelZh: string; icon: typeof Globe2; note: string; noteZh: string }> = [
@@ -30,16 +32,125 @@ const navItems: Array<{ id: Exclude<HubSection, 'home'>; label: string; labelZh:
 ];
 
 const HOME_BACKGROUNDS = [
-  '/home-wallpapers/learn-english-room.png',
-  '/home-wallpapers/watercolor-adventure.png',
-  '/home-wallpapers/island-quest.png',
-  '/home-wallpapers/notebook-adventure.png',
+  assetUrl('home-wallpapers/learn-english-room.png'),
+  assetUrl('home-wallpapers/watercolor-adventure.png'),
+  assetUrl('home-wallpapers/island-quest.png'),
+  assetUrl('home-wallpapers/notebook-adventure.png'),
 ];
-const WORLD_MAP_IMG = '/ChatGPT_Image_Aug_12,_2026,_06_03_48_AM_(1).png';
+const WORLD_MAP_IMG = assetUrl('ChatGPT_Image_Aug_12,_2026,_06_03_48_AM_(1).png');
 const ROAM_VIDEOS = [
-  'https://res.cloudinary.com/tjjlhlpp/video/upload/v1786763580/Video_Project_12.mp4',
-  'https://res.cloudinary.com/tjjlhlpp/video/upload/v1786763791/Video_Project_13_1.mp4',
+  assetUrl('videos/woodstock-roam.mp4'),
+  'https://res.cloudinary.com/tjjlhlpp/video/upload/Video_Project_13_1.mp4',
 ];
+
+function useMenuMusic(section: HubSection, muted: boolean) {
+  useEffect(() => {
+    const source = section === 'home'
+      ? assetUrl('music/crystal-menu-drift.mp3')
+      : section === 'world'
+        ? assetUrl('music/pumpkin-hop-world-map.mp3')
+        : null;
+    if (!source) return;
+    const audio = new Audio(source);
+    audio.loop = true;
+    audio.volume = muted ? 0 : 0.32;
+    const play = () => { audio.play().catch(() => { /* Browsers wait for the player's first interaction. */ }); };
+    play();
+    window.addEventListener('pointerdown', play, { once: true });
+    return () => { window.removeEventListener('pointerdown', play); audio.pause(); audio.currentTime = 0; };
+  }, [section, muted]);
+}
+
+// Images used after leaving the menu. Fetch them while the player is choosing
+// where to go, so scene changes never reveal an empty background while loading.
+const WORLD_PRELOAD_IMAGES = [
+  WORLD_MAP_IMG,
+  assetUrl('maps/usa-roam-map.png'),
+  assetUrl('cafe_room.png'),
+  assetUrl('Use_AI_Image_Jun_15,_2026,_19_20_35.png'),
+  assetUrl('Gemini_Generated_Image_a625ema625ema625.png'),
+  assetUrl('ChatGPT_Image_Jun_14,_2026,_05_36_59_PM.png'),
+  assetUrl('man_in_g.png'),
+  assetUrl('man_in_g_on_floor.png'),
+  assetUrl('a1.png'),
+  assetUrl('a2.png'),
+  assetUrl('a3.png'),
+  assetUrl('a4.png'),
+  assetUrl('scenes/bella/a5.png'),
+  assetUrl('scenes/bella/a6.png'),
+  assetUrl('scenes/bella/b1-woman.png'),
+  assetUrl('scenes/bella/b2.png'),
+  assetUrl('scenes/bella/b3-no-cyclists.png'),
+  assetUrl('scenes/bella/b4-no-cyclists.png'),
+  assetUrl('scenes/bella/b5-no-cyclists.png'),
+  assetUrl('scenes/bella/b6 copy.png'),
+  assetUrl('scenes/shop/c1.png'),
+  assetUrl('scenes/shop/c2.png'),
+  assetUrl('scenes/shop/c3.png'),
+  assetUrl('scenes/shop/c4.png'),
+  assetUrl('scenes/shop/c5.png'),
+  assetUrl('scenes/shop/c1-v2.png'),
+  assetUrl('scenes/shop/c2-v2.png'),
+  assetUrl('scenes/shop/c7.png'),
+  assetUrl('scenes/shop/c8.png'),
+  assetUrl('scenes/bus/d1.png'),
+  assetUrl('scenes/bus/d2.png'),
+  assetUrl('scenes/bus/d3.png'),
+  assetUrl('scenes/bus/d4.png'),
+  assetUrl('scenes/home/e1-enhanced.png'),
+  assetUrl('scenes/home/e2-enhanced.png'),
+  assetUrl('scenes/home/e3-enhanced.png'),
+  assetUrl('scenes/home/e4-enhanced.png'),
+  assetUrl('scenes/home/e5-enhanced.png'),
+  assetUrl('scenes/soccer/g1.png'),
+  assetUrl('scenes/soccer/g2.png'),
+  assetUrl('scenes/soccer/g3.png'),
+  assetUrl('scenes/soccer/g4.png'),
+  assetUrl('scenes/soccer/g5.png'),
+  assetUrl('scenes/soccer/g6.png'),
+  assetUrl('scenes/soccer/g7.png'),
+  assetUrl('scenes/garden/f1.png'),
+  assetUrl('scenes/garden/f2.png'),
+  assetUrl('scenes/garden/f3.png'),
+  assetUrl('scenes/garden/f4.png'),
+];
+
+function preloadImage(source: string): Promise<void> {
+  return new Promise(resolve => {
+    const image = new Image();
+    const timeout = window.setTimeout(resolve, 6000);
+    const finish = () => {
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    image.onload = async () => {
+      try { await image.decode(); } catch { /* The image can still be painted. */ }
+      finish();
+    };
+    // A missing optional asset must not leave the app on its loading screen.
+    image.onerror = finish;
+    image.src = source;
+  });
+}
+
+// Keep the previous scene visible while the next image decodes. This prevents
+// the black/blank flash that occurs when a large scene image is swapped.
+function SceneBackground({ source, alt }: { source: string; alt: string }) {
+  const [visibleSource, setVisibleSource] = useState(source);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (source === visibleSource) return;
+    let active = true;
+    setLoading(true);
+    const image = new Image();
+    const reveal = async () => { try { await image.decode(); } catch { /* paintable even if decode is unavailable */ } if (active) { setVisibleSource(source); setLoading(false); } };
+    image.onload = reveal;
+    image.onerror = reveal;
+    image.src = source;
+    return () => { active = false; };
+  }, [source, visibleSource]);
+  return <><img src={visibleSource} alt={alt} className="absolute inset-0 h-full w-full object-cover" draggable={false} />{loading && <div className="scene-preload z-20"><span>Loading scene…</span></div>}</>;
+}
 
 const revisionWords = [
   { italian: 'hello', english: '你好' },
@@ -49,12 +160,22 @@ const revisionWords = [
   { italian: 'coffee', english: '咖啡' },
 ];
 
-export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAudio }: MainMenuProps) {
+export default function MainMenu({ onNewGame, onContinue, onStartAudio }: MainMenuProps) {
   const { isChinese } = useLanguage();
+  const menuOverlay = useDebugOverlay();
+  const { debugMode: menuDebugMode, sceneRef: menuSceneRef, handleSceneMouseMove: handleMenuMouseMove } = menuOverlay;
   const [homeBackground] = useState(() => HOME_BACKGROUNDS[Math.floor(Math.random() * HOME_BACKGROUNDS.length)]);
-  const { hasSave } = useSave();
+  const [isMenuReady, setIsMenuReady] = useState(false);
+  const [worldAssetsReady, setWorldAssetsReady] = useState(false);
+  const [isWorldLoading, setIsWorldLoading] = useState(false);
+  const { hasSave, selectSlot, getActiveSlot } = useSave();
   const [saveExists, setSaveExists] = useState(false);
+  const [activeSaveSlot, setActiveSaveSlot] = useState(() => getActiveSlot());
+  const [worldReady, setWorldReady] = useState(false);
   const [section, setSection] = useState<HubSection>('home');
+  const [soundMuted, setSoundMuted] = useState(() => localStorage.getItem('taletalk-sound-muted') === 'true');
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  useMenuMusic(section, soundMuted);
   const [revisionIndex, setRevisionIndex] = useState(0);
   const [revisionInput, setRevisionInput] = useState('');
   const [revisionResult, setRevisionResult] = useState<'correct' | 'wrong' | null>(null);
@@ -62,8 +183,71 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
   const [multiplayerIndex, setMultiplayerIndex] = useState(0);
   const [multiInput, setMultiInput] = useState('');
   const [multiResult, setMultiResult] = useState<'correct' | 'wrong' | null>(null);
-  const [bellaMemoryComplete, setBellaMemoryComplete] = useState(false);
-  const [shopMemoryComplete, setShopMemoryComplete] = useState(false);
+  const progressKey = (name: string, slot = activeSaveSlot) => `taletalk-slot-${slot}-${name}`;
+  const [bellaMemoryComplete, setBellaMemoryComplete] = useState(() => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-bella-complete`) === 'true');
+  const [shopMemoryComplete, setShopMemoryComplete] = useState(() => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-shop-complete`) === 'true');
+  const [busComplete, setBusComplete] = useState(() => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-bus-complete`) === 'true');
+  const [homeComplete, setHomeComplete] = useState(() => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-home-complete`) === 'true');
+  const [soccerComplete, setSoccerComplete] = useState(() => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-soccer-complete`) === 'true');
+
+  const switchSaveSlot = (slot: number) => {
+    selectSlot(slot); setActiveSaveSlot(slot);
+    setWorldReady(true);
+    setBellaMemoryComplete(localStorage.getItem(progressKey('bella-complete', slot)) === 'true');
+    setShopMemoryComplete(localStorage.getItem(progressKey('shop-complete', slot)) === 'true');
+    setBusComplete(localStorage.getItem(progressKey('bus-complete', slot)) === 'true');
+    setHomeComplete(localStorage.getItem(progressKey('home-complete', slot)) === 'true');
+    setSoccerComplete(localStorage.getItem(progressKey('soccer-complete', slot)) === 'true');
+    hasSave().then(setSaveExists);
+  };
+
+  // A tiny synthesized UI tick keeps the menu responsive without requiring an external sound file.
+  useEffect(() => {
+    let lastButton: Element | null = null;
+    const play = (event: MouseEvent) => {
+      if (soundMuted) return;
+      const button = (event.target as Element).closest('.nav-item');
+      const previousButton = (event.relatedTarget as Element | null)?.closest?.('.nav-item');
+      if (!button || button === lastButton || button === previousButton) return;
+      lastButton = button;
+      try { const context = new AudioContext(); const oscillator = context.createOscillator(); const gain = context.createGain(); oscillator.frequency.value = 520; gain.gain.setValueAtTime(0.025, context.currentTime); gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.055); oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + 0.06); } catch { /* optional audio */ }
+    };
+    const clear = (event: MouseEvent) => {
+      const button = (event.target as Element).closest('.nav-item');
+      const nextButton = (event.relatedTarget as Element | null)?.closest?.('.nav-item');
+      if (button && button !== nextButton && button === lastButton) lastButton = null;
+    };
+    document.addEventListener('mouseover', play);
+    document.addEventListener('mouseout', clear);
+    return () => { document.removeEventListener('mouseover', play); document.removeEventListener('mouseout', clear); };
+  }, [soundMuted]);
+
+  useEffect(() => {
+    if (!isWorldLoading) return;
+    let cancelled = false;
+    Promise.all(WORLD_PRELOAD_IMAGES.map(preloadImage)).then(() => {
+      if (!cancelled) setWorldAssetsReady(true);
+    });
+    return () => { cancelled = true; };
+  }, [isWorldLoading]);
+
+  // The menu controls used to mount before its CSS background had arrived.
+  // Wait for the selected image to decode so the entire screen appears together,
+  // both on first launch and when returning from an adventure.
+  useEffect(() => {
+    let cancelled = false;
+    const startedAt = performance.now();
+    const finish = async () => {
+      const remainingDelay = Math.max(0, 180 - (performance.now() - startedAt));
+      window.setTimeout(() => {
+        if (!cancelled) setIsMenuReady(true);
+      }, remainingDelay);
+    };
+
+    preloadImage(homeBackground).then(finish);
+
+    return () => { cancelled = true; };
+  }, [homeBackground]);
 
   const keyBufferRef = useRef('');
   const keyBufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,7 +271,7 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
             setSection('backyard');
           } else {
             onStartAudio();
-            onNewGame('tied');
+            onNewGame();
           }
         }
         else if (buf.endsWith('.2')) { 
@@ -108,14 +292,29 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
   }, [section, setSection, onNewGame, onStartAudio]);
 
   const openSection = (next: HubSection) => {
+    if (next === 'world') { setIsWorldLoading(true); return; }
     setSection(next);
   };
 
-  if (section === 'world') return <WorldMapSection onMenu={() => setSection('home')} onOpenMemory={() => setSection('backyard')} onOpenShop={() => setSection('shop')} onOpenMarket={() => setSection('market')} bellaMemoryComplete={bellaMemoryComplete} shopMemoryComplete={shopMemoryComplete} />;
+  useEffect(() => {
+    if (isWorldLoading && worldAssetsReady) {
+      setSection('world');
+      setIsWorldLoading(false);
+    }
+  }, [isWorldLoading, worldAssetsReady]);
+
+  if (!isMenuReady || isWorldLoading) {
+    return <MenuLoadingScreen isChinese={isChinese} />;
+  }
+
+  if (section === 'world') return <WorldMapSection onMenu={() => { setWorldReady(false); setSection('home'); }} startMapLoaded={worldReady} onStartNewGame={onNewGame} onOpenMemory={() => setSection('backyard')} onOpenShop={() => setSection('shop')} onOpenMarket={() => setSection('market')} onOpenBus={() => setSection('bus')} onOpenHome={() => setSection('family-home')} onOpenSoccer={() => setSection('soccer-match')} onSelectSaveSlot={switchSaveSlot} activeSaveSlot={activeSaveSlot} bellaMemoryComplete={bellaMemoryComplete} shopMemoryComplete={shopMemoryComplete} busComplete={busComplete} homeComplete={homeComplete} soccerComplete={soccerComplete} />;
   if (section === 'roam') return <RoamSection onMenu={() => setSection('home')} />;
-  if (section === 'backyard') return <BackyardAdventure onMenu={() => setSection('world')} onComplete={() => { setBellaMemoryComplete(true); setSection('world'); }} />;
-  if (section === 'shop') return <BellaShopAdventure onMenu={() => setSection('world')} onComplete={() => { setShopMemoryComplete(true); setSection('world'); }} />;
-  if (section === 'market') return <ShopTripAdventure onMenu={() => setSection('world')} onComplete={() => setSection('world')} />;
+  if (section === 'backyard') return <BackyardAdventure onMenu={() => setSection('world')} onComplete={() => { localStorage.setItem(progressKey('bella-complete'), 'true'); setBellaMemoryComplete(true); setSection('world'); }} />;
+  if (section === 'shop') return <BellaShopAdventure onMenu={() => setSection('world')} onComplete={() => { localStorage.setItem(progressKey('shop-complete'), 'true'); setShopMemoryComplete(true); setSection('world'); }} />;
+  if (section === 'market') return <ShopTripAdventure onMenu={() => setSection('world')} onComplete={() => { localStorage.setItem(progressKey('shop-complete'), 'true'); setShopMemoryComplete(true); setSection('world'); }} />;
+  if (section === 'bus') return <BusTicketAdventure onBack={() => setSection('world')} onBusComplete={() => { localStorage.setItem(progressKey('bus-complete'), 'true'); setBusComplete(true); setSection('world'); }} />;
+  if (section === 'family-home') return <HomeAdventure onBack={() => setSection('world')} onHomeComplete={() => { localStorage.setItem(progressKey('home-complete'), 'true'); setHomeComplete(true); setSection('world'); }} />;
+  if (section === 'soccer-match') return <SoccerMatchAdventure onBack={() => setSection('world')} onComplete={() => { localStorage.setItem(progressKey('soccer-complete'), 'true'); setSoccerComplete(true); setSection('world'); }} />;
 
   if (section !== 'home') {
     return (
@@ -123,7 +322,7 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
         <div className="hub-backdrop" />
         <header className="hub-header">
           <button className="icon-button" onClick={() => setSection('home')} aria-label={isChinese ? '返回主页' : 'Back to home'}><ChevronLeft size={20} /></button>
-          <div className="brand-lockup compact"><span>ITALIA</span><strong>Memorie</strong></div>
+          <div className="brand-lockup compact"><strong>TaleTalk</strong></div>
           <div style={{ width: 40 }} />
         </header>
         <main className="hub-content">{renderSection(section)}</main>
@@ -133,9 +332,13 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
   }
 
   return (
-    <div className={`hub-shell home-shell${homeBackground.includes('island-quest') ? ' home-shell-chalkboard' : ''}`}>
+    <div ref={menuSceneRef} onMouseMove={handleMenuMouseMove} className={`hub-shell home-shell${homeBackground.includes('island-quest') ? ' home-shell-chalkboard' : ''}${homeBackground.includes('notebook-adventure') ? ' home-shell-notebook' : ''}`}>
       <div className="home-image" style={{ backgroundImage: `url('${homeBackground}')` }} />
       <div className="home-wash" />
+      <div className="home-menu-tools">
+        <button className="home-tool-button" onClick={() => { const next = !soundMuted; setSoundMuted(next); localStorage.setItem('taletalk-sound-muted', String(next)); }} aria-label={soundMuted ? 'Turn sound on' : 'Mute sound'}>{soundMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}<span>{soundMuted ? 'Sound off' : 'Sound on'}</span></button>
+        <button className="home-tool-button" onClick={() => setCreditsOpen(true)}>Credits</button>
+      </div>
       <main className="home-content-centered">
         <div className="home-title-block">
           <h1 className="home-title">{isChinese ? <>汉语桥<br /><em>英语探险</em></> : <>Chinese Bridge<br /><em>English Quest</em></>}</h1>
@@ -146,11 +349,13 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
         </div>
       </main>
       <footer className="home-footer"><span>{isChinese ? '第一章 · 艾尔德伍兹' : 'Chapter I · Elderwoods'}</span><span>{isChinese ? '学习 · 探索 · 记住' : 'Learn · Explore · Remember'}</span></footer>
+      {menuDebugMode && <DebugOverlayPanel overlay={menuOverlay} mediaLabel="main-menu" />}
+      {creditsOpen && <div className="credits-backdrop" role="dialog" aria-modal="true" aria-label="TaleTalk credits" onClick={() => setCreditsOpen(false)}><section className="credits-card" onClick={event => event.stopPropagation()}><button className="credits-close" onClick={() => setCreditsOpen(false)} aria-label="Close credits"><X size={18} /></button><div className="credits-mark">TT</div><p className="credits-eyebrow">A TaleTalk production</p><h2>Built for stories that teach.</h2><p>TaleTalk creates immersive language adventures where every choice, word, and memory moves the story forward.</p><div className="credits-rule" /><p className="credits-meta">© 2026 TaleTalk · All rights reserved</p></section></div>}
     </div>
   );
 
   function renderSection(activeSection: HubSection) {
-    if (activeSection === 'world') return <WorldMapSection onMenu={() => setSection('home')} onOpenMemory={() => setSection('backyard')} onOpenShop={() => setSection('shop')} onOpenMarket={() => setSection('market')} bellaMemoryComplete={bellaMemoryComplete} shopMemoryComplete={shopMemoryComplete} />;
+    if (activeSection === 'world') return <WorldMapSection onMenu={() => { setWorldReady(false); setSection('home'); }} startMapLoaded={worldReady} onStartNewGame={onNewGame} onOpenMemory={() => setSection('backyard')} onOpenShop={() => setSection('shop')} onOpenMarket={() => setSection('market')} onOpenBus={() => setSection('bus')} onOpenHome={() => setSection('family-home')} onOpenSoccer={() => setSection('soccer-match')} onSelectSaveSlot={switchSaveSlot} activeSaveSlot={activeSaveSlot} bellaMemoryComplete={bellaMemoryComplete} shopMemoryComplete={shopMemoryComplete} busComplete={busComplete} homeComplete={homeComplete} soccerComplete={soccerComplete} />;
     if (activeSection === 'roam') return <RoamSection onMenu={() => setSection('home')} />;
     if (activeSection === 'adventure') return <AdventureSection />;
     if (activeSection === 'revision') return <RevisionSection />;
@@ -162,7 +367,7 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
     return <section className="section-stack">
       <SectionHeading eyebrow={isChinese ? '选择故事' : 'Choose your story'} title={isChinese ? '冒险' : 'Adventure'} description={isChinese ? '在这个世界里，每个英语单词都会改变接下来发生的事。' : 'Step into a world where every word can change what happens next.'} />
       <div className="adventure-card active-card" onClick={() => { onStartAudio(); onNewGame(); }}>
-        <div className="adventure-art" style={{ backgroundImage: `url('/cafe_room.png')` }} />
+        <div className="adventure-art" style={{ backgroundImage: `url('${assetUrl('cafe_room.png')}')` }} />
         <div className="adventure-copy">
           <div className="card-label">{isChinese ? '第一章 · 艾尔德伍兹' : 'Chapter I · Elderwoods'}</div>
           <h2>{isChinese ? '汉语桥·英语探险' : 'Chinese Bridge · English Quest'}</h2>
@@ -206,35 +411,79 @@ export default function MainMenu({ onNewGame, onContinue, onStartAudio, onStopAu
   function SettingsSection() { return <section className="section-stack"><SectionHeading eyebrow="Quiet for now" title="Settings" description="Your preferences will live here soon." /><div className="empty-card"><Settings size={28} /><h2>Nothing to change yet</h2><p>Audio, language, and accessibility options are coming in a future chapter.</p></div></section>; }
 }
 
+function MenuLoadingScreen({ isChinese }: { isChinese: boolean }) {
+  return (
+    <div className="menu-loading-screen" role="status" aria-live="polite">
+      <div className="menu-loading-content">
+        <div className="menu-loading-mark">CB</div>
+        <p>{isChinese ? '正在准备你的冒险…' : 'Preparing your adventure…'}</p>
+        <span className="menu-loading-bar" />
+      </div>
+    </div>
+  );
+}
+
 function SectionHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) { return <div className="section-heading"><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>; }
 
 
 
 
 
-function WorldMapSection({ onMenu, onOpenMemory, onOpenShop, onOpenMarket, bellaMemoryComplete, shopMemoryComplete }: { onMenu: () => void; onOpenMemory: () => void; onOpenShop: () => void; onOpenMarket: () => void; bellaMemoryComplete: boolean; shopMemoryComplete: boolean }) {
+function WorldMapSection({ onMenu, startMapLoaded, onStartNewGame, onOpenMemory, onOpenShop, onOpenMarket, onOpenBus, onOpenHome, onOpenSoccer, onSelectSaveSlot, activeSaveSlot, bellaMemoryComplete, shopMemoryComplete, busComplete, homeComplete, soccerComplete }: { onMenu: () => void; startMapLoaded: boolean; onStartNewGame: () => void; onOpenMemory: () => void; onOpenShop: () => void; onOpenMarket: () => void; onOpenBus: () => void; onOpenHome: () => void; onOpenSoccer: () => void; onSelectSaveSlot: (slot: number) => void; activeSaveSlot: number; bellaMemoryComplete: boolean; shopMemoryComplete: boolean; busComplete: boolean; homeComplete: boolean; soccerComplete: boolean }) {
   const { isChinese } = useLanguage();
+  const { listSlots, nameSlot, removeSlot } = useSave();
   const [hovered, setHovered] = useState(false);
   const [hoveredShop, setHoveredShop] = useState(false);
   const [hoveredMarket, setHoveredMarket] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(() => localStorage.getItem('elderwood-map-welcome-seen') !== 'true');
+  const [wordBoxOpen, setWordBoxOpen] = useState(false);
+  const [saveSlots, setSaveSlots] = useState(() => listSlots());
+  const [mapLoaded, setMapLoaded] = useState(startMapLoaded);
+  const [creatingSlot, setCreatingSlot] = useState<number | null>(null);
+  const [deletingSlot, setDeletingSlot] = useState<{ slot: number; name: string } | null>(null);
+  const [fileName, setFileName] = useState('');
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [savedWords] = useState(() => JSON.parse(localStorage.getItem('elderwood-unlocked-words') ?? '[]') as string[]);
   const overlay = useDebugOverlay();
   const { debugMode, sceneRef, handleSceneMouseMove } = overlay;
+  const chooseSaveFile = (file: { slot: number; name: string | null; avatar: string | null; phase: GamePhase | null }) => {
+    if (!file.name && !file.phase) { setCreatingSlot(file.slot); setFileName(''); setAvatar(null); return; }
+    onSelectSaveSlot(file.slot);
+    setMapLoaded(true);
+  };
+
+  const createSaveFile = () => {
+    if (creatingSlot === null || !fileName.trim()) return;
+    ['bella-complete', 'shop-complete', 'bus-complete', 'home-complete', 'soccer-complete'].forEach(name => localStorage.removeItem(`taletalk-slot-${creatingSlot}-${name}`));
+    localStorage.removeItem(`taletalk-save-slot-${creatingSlot}`);
+    nameSlot(creatingSlot, fileName.trim(), avatar);
+    onSelectSaveSlot(creatingSlot);
+    setCreatingSlot(null);
+    onStartNewGame();
+  };
+  const readAvatar = (file: File | undefined) => { if (!file) return; const reader = new FileReader(); reader.onload = () => setAvatar(String(reader.result)); reader.readAsDataURL(file); };
+
+  if (!mapLoaded) return <div className="save-select-screen"><img className="save-select-bg" src={HOME_BACKGROUNDS[0]} alt="" /><div className="save-select-shade" /><main className="save-select-card"><p className="save-select-label">Data List</p><h1>Select data to load</h1><div className="save-select-list">{saveSlots.map(file => <div key={file.slot} className={`save-file-row ${file.slot === activeSaveSlot ? 'active' : ''}`}>{file.name ? <><button className="save-file-load" onClick={() => chooseSaveFile(file)}>{file.avatar ? <img src={file.avatar} className="save-avatar-image" alt="" /> : <span className={`save-avatar save-avatar-${file.slot}`}>{file.name.slice(0, 2).toUpperCase()}</span>}<span><strong>{file.name}</strong><small>Last scene · {file.phase ?? 'Opening scene'}</small></span><span className="save-file-time">Play time<br /><b>{file.updatedAt ? 'In progress' : '00:00'}</b></span></button><button className="save-file-delete" onClick={() => setDeletingSlot({ slot: file.slot, name: file.name! })} aria-label={`Delete ${file.name}`}><X size={17} /></button></> : <button className="save-file-new" onClick={() => chooseSaveFile(file)}><span className="save-avatar">+</span><span><strong>Create a new story</strong><small>Empty save file {file.slot}</small></span></button>}</div>)}</div><button className="save-select-menu" onClick={onMenu}>Back to menu</button>{creatingSlot !== null && <div className="save-form"><h2>Create a new story</h2><input value={fileName} onChange={event => setFileName(event.target.value)} placeholder="File name" autoFocus /><label>Choose avatar photo<input type="file" accept="image/*" onChange={event => readAvatar(event.target.files?.[0])} /></label>{avatar && <img src={avatar} className="save-avatar-preview" alt="Avatar preview" />}<div><button onClick={() => setCreatingSlot(null)}>Cancel</button><button onClick={createSaveFile}>Start adventure</button></div></div>}{deletingSlot && <div className="save-form"><h2>Delete {deletingSlot.name}?</h2><p>Type the file name to confirm.</p><input autoFocus placeholder={deletingSlot.name} onChange={event => { if (event.target.value === deletingSlot.name) { removeSlot(deletingSlot.slot); setSaveSlots(listSlots()); setDeletingSlot(null); } }} /><button onClick={() => setDeletingSlot(null)}>Cancel</button></div>}</main></div>;
 
   return (
     <div
       className="world-map-scene"
       ref={sceneRef}
       onMouseMove={handleSceneMouseMove}
+      onClick={() => { if (showWelcome) { localStorage.setItem('elderwood-map-welcome-seen', 'true'); setShowWelcome(false); } }}
     >
       <img className="world-map-image" src={WORLD_MAP_IMG} alt="The world map" draggable={false} />
       <div className="world-map-vignette" />
       <header className="world-map-topbar">
         <div>
-          <h1>Memorie Perdute</h1>
+          <h1>TaleTalk</h1>
           <span>{isChinese ? '世界地图 · 第一章' : 'THE WORLD MAP · CHAPTER I'}</span>
         </div>
-        <button className="world-map-menu" onClick={onMenu}>{isChinese ? '菜单' : 'Menu'}</button>
+        <div className="flex gap-2"><button className="world-map-menu" onClick={() => { setSaveSlots(listSlots()); setMapLoaded(false); }}>{isChinese ? '存档' : `Save files · ${activeSaveSlot}/6`}</button><button className="world-map-menu" onClick={() => setWordBoxOpen(open => !open)}>{isChinese ? '已解锁单词' : `Words${savedWords.length ? ` (${savedWords.length})` : ''}`}</button><button className="world-map-menu" onClick={onMenu}>{isChinese ? '菜单' : 'Menu'}</button></div>
       </header>
+
+
+      {wordBoxOpen && <div className="absolute right-5 top-20 z-30 w-56 rounded-2xl border border-white/15 bg-black/90 p-3 shadow-2xl"><div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[#c4942a]">{isChinese ? '已解锁单词' : 'Unlocked words'}</div>{savedWords.length ? <div className="max-h-56 space-y-1 overflow-y-auto">{savedWords.map(word => <div key={word} className="rounded-lg bg-white/5 px-2 py-1.5 text-sm text-white">{word}</div>)}</div> : <p className="text-xs text-white/55">{isChinese ? '输入单词即可在这里解锁。' : 'Type words in scenes to unlock them here.'}</p>}</div>}
 
       <div className="world-map-intro world-map-intro-sm">
         <div className="eyebrow">{isChinese ? '第一章 · 艾尔德伍兹' : 'Chapter I · Elderwoods'}</div>
@@ -242,16 +491,18 @@ function WorldMapSection({ onMenu, onOpenMemory, onOpenShop, onOpenMarket, bella
         <p>{isChinese ? '每个发光点都藏着一段等待重温的记忆。旅程从艾尔德伍兹开始。' : 'Each glowing point holds a memory waiting to be relived. Your journey begins in Elderwoods, where it all began.'}</p>
       </div>
 
+      {showWelcome && <button className="world-map-dialogue" onClick={() => { localStorage.setItem('elderwood-map-welcome-seen', 'true'); setShowWelcome(false); }}><div className="world-map-dialogue-head"><div><div className="eyebrow">Welcome to Elderwood</div><h3>欢迎来到艾尔德伍德！</h3></div></div><p>在这里，你将探索新的区域，认识新的人，并在学习一门新语言的同时发现新的冒险。</p><span>点击任意位置继续</span></button>}
+
       <button
         className="map-memory-point"
         style={{ left: '37%', top: '59%' }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        onClick={(e) => { e.stopPropagation(); onOpenMemory(); }}
+        onClick={(e) => { e.stopPropagation(); if (shopMemoryComplete) window.alert('You must gain a ★ Star in order to proceed to the next level.'); else onOpenMemory(); }}
         aria-label={isChinese ? '打开第一段记忆' : 'Open the first memory'}
       >
         <span className="hotspot-pulse" />
-        <span className="map-memory-badge">{bellaMemoryComplete ? '2/2' : '0/2'}</span>
+        <span className="map-memory-badge">{shopMemoryComplete ? '2/6' : bellaMemoryComplete ? '1/6' : '0/6'}</span>
         {hovered && <span className="hotspot-tooltip">{isChinese ? '第一段记忆' : 'The first memory'}</span>}
       </button>
 
@@ -269,6 +520,10 @@ function WorldMapSection({ onMenu, onOpenMemory, onOpenShop, onOpenMarket, bella
           {hoveredShop && <span className="hotspot-tooltip">{isChinese ? '冰淇淋记忆' : 'The ice cream memory'}</span>}
         </button>
       )}
+
+      {shopMemoryComplete && <button className="map-memory-point" style={{ left: '46.3%', top: '38.6%' }} onClick={onOpenBus} aria-label="Unlock a star at the bus stop"><span className="hotspot-pulse" /><span className="map-memory-badge">{busComplete ? '★' : '☆'}</span><span className="hotspot-tooltip">Bus stop · unlock a star</span></button>}
+      {busComplete && <button className="map-memory-point" style={{ left: '41.7%', top: '34.3%' }} onClick={onOpenHome} aria-label="Open the house"><span className="hotspot-pulse" /><span className="map-memory-badge">{homeComplete ? '★' : '★'}</span><span className="hotspot-tooltip">The Corner House</span></button>}
+      {homeComplete && <button className="map-memory-point" style={{ left: '50.6%', top: '33.4%' }} onClick={onOpenSoccer} aria-label="Open the soccer match"><span className="hotspot-pulse" /><span className="map-memory-badge">{soccerComplete ? 'GOAL!' : 'NEW'}</span><span className="hotspot-tooltip">Soccer Match</span></button>}
 
       {debugMode && <DebugOverlayPanel overlay={overlay} mediaLabel={WORLD_MAP_IMG.split('/').pop()!} />}
 
@@ -442,15 +697,15 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
   }, [cancel, onComplete]);
 
   useEffect(() => {
-    if (phase === 'grazie') speak(isChinese ? '谢谢！' : 'Thank you!', 'female');
-    else if (phase === 'prego') speak(isChinese ? '不客气！' : 'You are welcome!', 'female');
+    if (phase === 'grazie') speak(isChinese ? '谢谢！' : 'Thank you!', 'bella');
+    else if (phase === 'prego') speak(isChinese ? '不客气！' : 'You are welcome!', 'shopkeeper');
     else {
       const dialogue = sceneDialogue(phase);
-      if (dialogue) speak(dialogue, phase === 'bella-excited' || phase === 'wife-angry' ? 'female' : 'male');
+      if (dialogue) speak(dialogue, phase === 'bella-excited' ? 'bella' : phase === 'wife-angry' ? 'wife' : 'josh');
     }
   }, [phase, isChinese, speak]);
 
-  const images = ['/scenes/bella/b1-woman.png', '/scenes/bella/b2.png', '/scenes/bella/b3-no-cyclists.png', '/scenes/bella/b4-no-cyclists.png', '/scenes/bella/b5-no-cyclists.png', '/scenes/bella/b6 copy.png'];
+  const images = ['scenes/bella/b1-woman.png', 'scenes/bella/b2.png', 'scenes/bella/b3-no-cyclists.png', 'scenes/bella/b4-no-cyclists.png', 'scenes/bella/b5-no-cyclists.png', 'scenes/bella/b6 copy.png'].map(assetUrl);
   const image =
     phase === 'intro' || phase === 'bella-excited' ? images[0]
     : phase === 'counter' || phase === 'order' || phase === 'order-speaking' ? images[1]
@@ -472,6 +727,19 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
   };
 
   const canClick = phase === 'intro' || phase === 'bella-excited' || phase === 'counter' || phase === 'ending' || phase === 'phone-call' || phase === 'wife-angry' || phase === 'wife-warning' || phase === 'wife-hangup';
+
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      if (canClick) advance();
+      else if (phase === 'order') { setChosenOrder(SHOP_CHOICES.find(choice => choice.correct) ?? null); setPhase('grazie'); }
+      else if (phase === 'grazie') setPhase('prego');
+      else if (phase === 'prego') setPhase('ending');
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [phase, canClick]);
 
   const getWordMatchState = (choice: typeof SHOP_CHOICES[number]) => {
     const flatString = choice.wordTooltips.map(w => stripAccents(w.word.toLowerCase())).join(' ');
@@ -508,7 +776,7 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
         speak(isChinese ? match.englishLabel : match.prompt, 'male', () => setTimeout(() => setPhase('grazie'), 3500));
       } else {
         setOrderWrong(true);
-        speak(match.responseIt, 'female');
+        speak(match.responseIt, 'shopkeeper');
       }
       setOrderInput('');
     } else {
@@ -545,7 +813,7 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
         const existing = new Set(prev.map(w => w.word));
         return [...prev, ...GRAZIE_WORDS.filter(w => !existing.has(w.word))];
       });
-      speak('Thank you', 'female');
+      speak('Thank you', 'bella');
       setGrazieInput('');
       setTimeout(() => { setGrazieDone(false); setPhase('prego'); }, 2000);
     } else {
@@ -561,7 +829,7 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
         const existing = new Set(prev.map(w => w.word));
         return [...prev, ...PREGO_WORDS.filter(w => !existing.has(w.word))];
       });
-      speak('You are welcome', 'female');
+      speak('You are welcome', 'shopkeeper');
       setPregoInput('');
       setTimeout(() => { setPregoDone(false); setPhase('ending'); }, 2000);
     } else {
@@ -575,12 +843,12 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
   const speakerName = isChinese
     ? (phase === 'bella-excited' ? '贝拉' : phase === 'wife-angry' ? '妻子' : '旁白')
     : (phase === 'bella-excited' ? 'Bella' : phase === 'wife-angry' ? 'Wife' : 'Narrator');
-  const showDialogue = canClick || phase === 'ending';
+  const showDialogue = canClick;
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden flex items-center justify-center" onClick={() => { if (canClick) advance(); }}>
       <div ref={sceneRef} className="relative h-screen aspect-square max-w-screen max-h-screen" onMouseMove={handleSceneMouseMove}>
-        <img key={image} src={image} alt="Bella's ice cream memory" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
+        <SceneBackground source={image} alt="Bella's ice cream memory" />
         <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/90 pointer-events-none" />
         <header className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-5 pt-4">
           <div><h1 className="text-white text-lg font-bold" style={{ fontFamily: "'Playfair Display', serif" }}>{isChinese ? '英语冒险' : 'English Adventure'}</h1><span className="text-white/70 text-[10px] uppercase tracking-[0.2em]">{isChinese ? '冰淇淋店' : 'The ice cream shop'}</span></div>
@@ -825,13 +1093,6 @@ function BellaShopAdventure({ onMenu, onComplete }: { onMenu: () => void; onComp
   );
 }
 
-function formatTime(s: number): string {
-  if (!isFinite(s)) return '0:00';
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${sec.toString().padStart(2, '0')}`;
-}
-
 interface RoamWordBox {
   id: string;
   italian: string;
@@ -844,13 +1105,31 @@ interface RoamWordBox {
 
 const roamWordBoxes: RoamWordBox[] = [
   {
+    id: 'bridge',
+    italian: 'Bridge',
+    english: '桥',
+    fact: '这里原来的铁桥建于约 1870 年，是帕克桥设计早期的重要范例。1980 年重建时，桥梁两侧保留了具有历史价值的铁桁架，因此它至今仍保有这种独特的老式外观。',
+    points: [{ x: 65.7, y: 56.1 }, { x: 73.6, y: 55.3 }, { x: 65.4, y: 60.8 }, { x: 73.3, y: 60.8 }],
+    showFrom: 1,
+    showUntil: 10,
+  },
+  {
+    id: 'trees',
+    italian: 'Trees',
+    english: '树木',
+    fact: '伍德斯托克以枫树闻名。秋天尤为壮观，因为糖枫会变成明亮的黄色、橙色和深红色。',
+    points: [{ x: 28, y: 43.3 }, { x: 35.4, y: 42.2 }, { x: 28.1, y: 47.6 }, { x: 35, y: 47.9 }],
+    showFrom: 14,
+    showUntil: 21,
+  },
+  {
     id: 'river',
     italian: 'River',
     english: '河流',
-    fact: '河流是流动的水体，通常汇入湖泊、大海或另一条河流。',
-    points: [{ x: 4.6, y: 60.4 }, { x: 13, y: 60 }, { x: 5.2, y: 66.3 }, { x: 12.2, y: 65.8 }],
-    showFrom: 2,
-    showUntil: 10,
+    fact: '流经伍德斯托克的河流是奥塔奎奇河（Ottauquechee River）。有趣的是，它的名字来自一个原住民词语，常被解释为“湍急的山间溪流”。',
+    points: [{ x: 21.1, y: 62 }, { x: 27.3, y: 61.2 }, { x: 21, y: 67.8 }, { x: 27.5, y: 67.5 }],
+    showFrom: 21,
+    showUntil: 33,
   },
 ];
 
@@ -873,21 +1152,19 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [showControls, setShowControls] = useState(false);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [videoMuted, setVideoMuted] = useState(false);
+  const [videoMuted, setVideoMuted] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [scrubbing, setScrubbing] = useState(false);
   const [toolsEnabled, setToolsEnabled] = useState(true);
   const [activeWord, setActiveWord] = useState<RoamWordBox | null>(null);
   const [autoPauseOnWord, setAutoPauseOnWord] = useState(true);
   const [pausedForActiveWord, setPausedForActiveWord] = useState(false);
   const [videoIndex, setVideoIndex] = useState(0);
   const [locationSelected, setLocationSelected] = useState(false);
+  const [roamLoading, setRoamLoading] = useState(false);
   // Dismissed words stay hidden only until the player leaves Roam.
   const [dismissedWordIds, setDismissedWordIds] = useState<string[]>([]);
-  const [savedWords, setSavedWords] = useState<RoamWordBox[]>(() => {
-    try { return JSON.parse(localStorage.getItem('memorie-roam-saved-words') ?? '[]'); } catch { return []; }
-  });
+  // Do not carry saved words from the previous roam into this refreshed video.
+  const [savedWords, setSavedWords] = useState<RoamWordBox[]>([]);
   const [savedWordsOpen, setSavedWordsOpen] = useState(false);
 
   useEffect(() => { localStorage.setItem('memorie-roam-saved-words', JSON.stringify(savedWords)); }, [savedWords]);
@@ -920,58 +1197,36 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onTime = () => { if (!scrubbing) setCurrentTime(v.currentTime); };
-    const onMeta = () => setDuration(v.duration);
+    const onTime = () => setCurrentTime(v.currentTime);
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     v.addEventListener('timeupdate', onTime);
-    v.addEventListener('loadedmetadata', onMeta);
     v.addEventListener('play', onPlay);
     v.addEventListener('pause', onPause);
-    v.play().catch(() => setVideoMuted(true));
+    // Native controls do not emit timeupdate at the same cadence in every
+    // browser. Poll the media clock so timed word overlays stay in sync.
+    const clock = window.setInterval(() => setCurrentTime(v.currentTime), 100);
+    v.play().catch(() => {
+      // Browsers can block autoplay with sound. Retry immediately as muted
+      // rather than leaving the video paused at 0:00 until the user moves it.
+      v.muted = true;
+      setVideoMuted(true);
+      v.play().catch(() => setIsPlaying(false));
+    });
     return () => {
+      window.clearInterval(clock);
       v.removeEventListener('timeupdate', onTime);
-      v.removeEventListener('loadedmetadata', onMeta);
       v.removeEventListener('play', onPlay);
       v.removeEventListener('pause', onPause);
     };
-  }, [scrubbing, videoIndex]);
-
-  const togglePlay = () => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (v.paused) v.play(); else v.pause();
-  };
-
-  const handleScrub = (e: React.MouseEvent<HTMLDivElement>) => {
-    const v = videoRef.current;
-    if (!v || !duration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    v.currentTime = pct * duration;
-    setCurrentTime(pct * duration);
-  };
-
-  const startScrub = (e: React.MouseEvent<HTMLDivElement>) => {
-    setScrubbing(true);
-    handleScrub(e);
-  };
-
-  useEffect(() => {
-    if (!scrubbing) return;
-    const end = () => setScrubbing(false);
-    window.addEventListener('mouseup', end);
-    return () => window.removeEventListener('mouseup', end);
-  }, [scrubbing]);
-
-  const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  }, [locationSelected, videoIndex]);
 
   if (!locationSelected) {
     return <div ref={sceneRef} className="roam-location-screen" onMouseMove={handleSceneMouseMove}>
-      <img src="/maps/usa-roam-map.png" alt="Map of the United States" className="roam-location-map" draggable={false} />
+          <img src={assetUrl('maps/usa-roam-map.png')} alt="Map of the United States" className="roam-location-map" draggable={false} />
       <div className="roam-location-shade" />
       <header className="roam-location-header"><div><p>{isChinese ? '选择目的地' : 'Choose a destination'}</p><h1>{isChinese ? '美国漫游地图' : 'USA Roam Map'}</h1></div><button className="world-map-menu" onClick={onMenu}>{isChinese ? '菜单' : 'Menu'}</button></header>
-      <button className="roam-location-marker roam-location-marker-woodstock" onClick={() => setLocationSelected(true)}>
+      <button className="roam-location-marker roam-location-marker-woodstock" onClick={() => { setRoamLoading(true); setLocationSelected(true); }}>
         <strong>Woodstock, Vermont</strong><small>{isChinese ? '开始漫游' : 'Start roaming'}</small>
       </button>
       <span className="roam-location-label roam-location-seattle">Seattle</span><span className="roam-location-label roam-location-chicago">Chicago</span><span className="roam-location-label roam-location-miami">Miami</span><span className="roam-location-label roam-location-la">Los Angeles</span>
@@ -994,10 +1249,13 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
         autoPlay
         preload="auto"
         muted={videoMuted}
+        controls={showControls}
         playsInline
         draggable={false}
         onEnded={() => setVideoIndex(index => (index + 1) % ROAM_VIDEOS.length)}
+        onCanPlay={() => setRoamLoading(false)}
       />
+      {roamLoading && <div className="scene-preload z-50"><span>Loading roam…</span></div>}
       <video
         aria-hidden="true"
         className="hidden"
@@ -1008,7 +1266,7 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
       <div className="world-map-vignette" />
       <header className="world-map-topbar">
         <div>
-          <h1>Memorie Perdute</h1>
+          <h1>TaleTalk</h1>
         </div>
         <div className="roam-top-actions">
           <button className="roam-tools-btn" onClick={() => setSavedWordsOpen(open => !open)}>
@@ -1052,26 +1310,6 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
       )}
 
       {debugMode && <DebugOverlayPanel overlay={overlay} mediaLabel="roam-video.mp4" />}
-
-      {showControls && (
-        <div className="roam-controls">
-          <button className="roam-play-btn" onClick={togglePlay}>
-            {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-          </button>
-          <span className="roam-time">{formatTime(currentTime)}</span>
-          <div
-            className="roam-scrubber"
-            onMouseDown={startScrub}
-            onMouseMove={(e) => { if (scrubbing) handleScrub(e); }}
-          >
-            <div className="roam-scrubber-track">
-              <div className="roam-scrubber-buffered" style={{ width: `${pct}%` }} />
-              <div className="roam-scrubber-thumb" style={{ left: `${pct}%` }} />
-            </div>
-          </div>
-          <span className="roam-time">{formatTime(duration)}</span>
-        </div>
-      )}
 
       {toolsEnabled && activeWord === null && roamWordBoxes
         .filter(w => currentTime >= w.showFrom && currentTime < w.showUntil && !dismissedWordIds.includes(w.id))
@@ -1139,9 +1377,9 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
               <h2 className="roam-word-popup-italian">{activeWord.italian}</h2>
               <button className="text-[#c4942a] transition hover:text-white" onClick={() => speak(activeWord.italian, 'female')} title={`Hear ${activeWord.italian} in English`} aria-label={`Hear ${activeWord.italian} in English`}><Volume2 size={18} /></button>
             </div>
-            <div className="roam-word-popup-english">{isChinese ? activeWord.english : 'river'}</div>
+            <div className="roam-word-popup-english">{activeWord.english}</div>
             <div className="roam-word-popup-divider" />
-            <p className="roam-word-popup-fact">{isChinese ? activeWord.fact : 'A river is a natural stream of flowing water that usually flows into a lake, sea, or another river.'}</p>
+            <p className="roam-word-popup-fact">{activeWord.fact}</p>
           </div>
         </div>
       )}
@@ -1158,17 +1396,25 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   );
 }
 
+const LEGACY_SHOPPING_STOPS = [
+  { id: 'bread', italian: 'Bread', english: '面包', image: assetUrl('scenes/shop/c3.png'), imageAlt: 'The bread shelf', foodPoint: { left: '78%', top: '28%' }, choices: ['Bread', 'Eggs', 'Honey'] },
+  { id: 'water', italian: 'Water', english: '水', image: assetUrl('scenes/shop/c4.png'), imageAlt: 'The drinks shelf', foodPoint: { left: '82%', top: '36%' }, choices: ['Water', 'Juice', 'Milk'] },
+  { id: 'fruit', italian: 'Fruit', english: '水果', image: assetUrl('scenes/shop/c5.png'), imageAlt: 'The food shelf', foodPoint: { left: '24%', top: '48%' }, choices: ['Fruit', 'Pasta', 'Sauce'] },
+] as const;
+
+void LEGACY_SHOPPING_STOPS;
+
 const SHOPPING_STOPS = [
-  { id: 'bread', italian: 'Bread', english: '面包', image: '/scenes/shop/c3.png', imageAlt: 'The bread shelf', foodPoint: { left: '78%', top: '28%' }, choices: ['Bread', 'Eggs', 'Honey'] },
-  { id: 'water', italian: 'Water', english: '水', image: '/scenes/shop/c4.png', imageAlt: 'The drinks shelf', foodPoint: { left: '82%', top: '36%' }, choices: ['Water', 'Juice', 'Milk'] },
-  { id: 'fruit', italian: 'Fruit', english: '水果', image: '/scenes/shop/c5.png', imageAlt: 'The food shelf', foodPoint: { left: '24%', top: '48%' }, choices: ['Fruit', 'Pasta', 'Sauce'] },
+  { id: 'bread', italian: 'Bread', english: 'Bread', image: assetUrl('scenes/shop/c3.png'), imageAlt: 'The bread shelf', foodPoint: { left: '78%', top: '28%' }, choices: ['A loaf of bread', 'Eggs', 'Honey'] },
+  { id: 'water', italian: 'Drinks', english: 'Drinks', image: assetUrl('scenes/shop/c4.png'), imageAlt: 'The drinks shelf', foodPoint: { left: '82%', top: '36%' }, choices: ['Water', 'Juice', 'Milk'] },
+  { id: 'fruit', italian: 'Fruit', english: 'Fruit, apples and bananas', image: assetUrl('scenes/shop/c5.png'), imageAlt: 'The food shelf', foodPoint: { left: '24%', top: '48%' }, choices: ['Apples and bananas', 'Pasta', 'Sauce'] },
 ] as const;
 
 function ShopTripAdventure({ onMenu, onComplete }: { onMenu: () => void; onComplete: () => void }) {
   const overlay = useDebugOverlay();
   const { debugMode, sceneRef, handleSceneMouseMove } = overlay;
   const { isChinese } = useLanguage();
-  const [phase, setPhase] = useState<'approach' | 'word-puzzle' | 'inside' | 'food-word' | 'pick-food' | 'checkout'>('approach');
+  const [phase, setPhase] = useState<'approach' | 'word-puzzle' | 'inside' | 'food-word' | 'pick-food' | 'detail-word' | 'checkout' | 'paid'>('approach');
   const [wordInput, setWordInput] = useState('');
   const [wordWrong, setWordWrong] = useState(false);
   const [wordDone, setWordDone] = useState(false);
@@ -1224,6 +1470,23 @@ function ShopTripAdventure({ onMenu, onComplete }: { onMenu: () => void; onCompl
   };
 
   const activeFood = SHOPPING_STOPS[activeFoodIndex];
+  // Keyboard progression always supplies the correct answer, so a player can
+  // read through any scene with the Right Arrow instead of repeatedly clicking.
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      if (phase === 'approach') setPhase('word-puzzle');
+      else if (phase === 'word-puzzle') { setUnlockedWords(words => words.some(w => w.word === SHOP_WORD.word) ? words : [...words, SHOP_WORD]); setPhase('inside'); }
+      else if (phase === 'inside') { setActiveFoodIndex(SHOPPING_STOPS.findIndex(item => !pickedFoodIds.includes(item.id))); setFoodInput(''); setPhase('food-word'); }
+      else if (phase === 'food-word') { setUnlockedWords(words => words.some(w => w.word === activeFood.italian) ? words : [...words, { word: activeFood.italian, translation: activeFood.english }]); setPhase('pick-food'); }
+      else if (phase === 'pick-food') setPhase('detail-word');
+      else if (phase === 'detail-word') { const picked = [...pickedFoodIds, activeFood.id]; setPickedFoodIds(picked); setPhase(picked.length === SHOPPING_STOPS.length ? 'checkout' : 'inside'); }
+      else if (phase === 'checkout') setPhase('paid');
+      else if (phase === 'paid') onComplete();
+    };
+    window.addEventListener('keydown', skip); return () => window.removeEventListener('keydown', skip);
+  }, [phase, activeFood, pickedFoodIds, onComplete]);
   const typedFood = stripAccents(foodInput.toLowerCase().trim());
   const foodPrefixLength = stripAccents(activeFood.italian.toLowerCase()).startsWith(typedFood) ? typedFood.length : 0;
   const submitFoodWord = (e: React.FormEvent) => {
@@ -1231,7 +1494,7 @@ function ShopTripAdventure({ onMenu, onComplete }: { onMenu: () => void; onCompl
     if (stripAccents(foodInput.trim().toLowerCase()) === stripAccents(activeFood.italian.toLowerCase())) {
       setUnlockedWords(prev => prev.some(word => word.word === activeFood.italian) ? prev : [...prev, { word: activeFood.italian, translation: activeFood.english }]);
       setFoodInput('');
-      setPhase('pick-food');
+      setPhase('detail-word');
     } else {
       setFoodWrong(true);
       setTimeout(() => setFoodWrong(false), 1500);
@@ -1239,32 +1502,51 @@ function ShopTripAdventure({ onMenu, onComplete }: { onMenu: () => void; onCompl
   };
 
   const chooseFood = (choice: string) => {
-    if (choice !== activeFood.italian) return;
+    const expected = activeFood.id === 'bread' ? 'A loaf of bread' : activeFood.id === 'water' ? 'Water' : 'Apples and bananas';
+    if (choice !== expected) return;
+    setFoodInput('');
+    setPhase('detail-word');
+    return;
     const picked = [...pickedFoodIds, activeFood.id];
     setPickedFoodIds(picked);
     if (picked.length === SHOPPING_STOPS.length) setPhase('checkout');
     else setPhase('inside');
+  };
+  const detailWord = activeFood.id === 'bread' ? 'a loaf of bread' : activeFood.id === 'water' ? 'water' : 'apples and bananas';
+  const submitDetailWord = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (stripAccents(foodInput.trim().toLowerCase()) !== detailWord) { setFoodWrong(true); setTimeout(() => setFoodWrong(false), 1500); return; }
+    setUnlockedWords(prev => {
+      const additions = activeFood.id === 'fruit' ? ['apples', 'bananas'] : [detailWord];
+      return additions.reduce((words, value) => words.some(word => word.word === value) ? words : [...words, { word: value, translation: value }], prev);
+    });
+    const stored = new Set<string>(JSON.parse(localStorage.getItem('elderwood-unlocked-words') ?? '[]'));
+    stored.add(activeFood.italian.toLowerCase());
+    (activeFood.id === 'fruit' ? ['apples', 'bananas'] : [detailWord]).forEach(value => stored.add(value));
+    localStorage.setItem('elderwood-unlocked-words', JSON.stringify([...stored].sort()));
+    const picked = [...pickedFoodIds, activeFood.id]; setPickedFoodIds(picked); setFoodInput('');
+    setPhase(picked.length === SHOPPING_STOPS.length ? 'checkout' : 'inside');
   };
 
   const submitPayment = (e: React.FormEvent) => {
     e.preventDefault();
     if (stripAccents(paymentInput.trim().toLowerCase()) === 'pay 5 euro') {
       cancel();
-      onComplete();
+      setPhase('paid');
     } else {
       setPaymentWrong(true);
       setTimeout(() => setPaymentWrong(false), 1500);
     }
   };
 
-  const image = phase === 'approach' || phase === 'word-puzzle' ? '/scenes/shop/c1.png' : phase === 'inside' ? '/scenes/shop/c2.png' : phase === 'checkout' ? '/scenes/shop/c2.png' : activeFood.image;
+  const image = phase === 'approach' || phase === 'word-puzzle' ? assetUrl('scenes/shop/c1-v2.png') : phase === 'inside' ? assetUrl('scenes/shop/c2-v2.png') : phase === 'checkout' ? assetUrl('scenes/shop/c7.png') : phase === 'paid' ? assetUrl('scenes/shop/c8.png') : activeFood.image;
   const typedShopWord = stripAccents(wordInput.toLowerCase().trim());
   const shopWordPrefixLength = 'shop'.startsWith(typedShopWord) ? typedShopWord.length : 0;
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden flex items-center justify-center">
       <div ref={sceneRef} className="relative h-screen aspect-square max-w-screen max-h-screen" onMouseMove={handleSceneMouseMove}>
-        <img key={image} src={image} alt="A trip to the shop" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
+        <SceneBackground source={image} alt="A trip to the shop" />
         <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/90 pointer-events-none" />
         <header className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-5 pt-4">
           <div><h1 className="text-white text-lg font-bold" style={{ fontFamily: "'Playfair Display', serif" }}>{isChinese ? '英语冒险' : 'English Adventure'}</h1><span className="text-white/70 text-[10px] uppercase tracking-[0.2em]">{isChinese ? '商店' : 'The shop'}</span></div>
@@ -1401,8 +1683,15 @@ function ShopTripAdventure({ onMenu, onComplete }: { onMenu: () => void; onCompl
           </>
         )}
 
+        {phase === 'detail-word' && (
+          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10" onClick={e => e.stopPropagation()}><div className="rounded-2xl border border-white/10 px-4 pb-3 pt-3" style={{ background: 'rgba(0,0,0,0.92)' }}><span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">Type the item to add it to your words</span><p className="my-2 text-white">Type <span className="text-green-400">{detailWord}</span></p><form onSubmit={submitDetailWord} className="flex gap-2"><input autoFocus value={foodInput} onChange={e => setFoodInput(e.target.value)} placeholder={`type ${detailWord}...`} className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none" /><button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs text-white">Enter</button></form>{foodWrong && <p className="mt-2 text-xs text-red-400">Not quite — type the whole item.</p>}</div></div>
+        )}
+
         {phase === 'checkout' && (
           <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10" onClick={e => e.stopPropagation()}><div className="rounded-2xl border border-white/10 px-4 pb-3 pt-3" style={{ background: 'rgba(0,0,0,0.92)' }}><span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">Checkout</span><p className="my-2 text-white">Type <span className="text-green-400">pay 5 euro</span> to complete the shop.</p><form onSubmit={submitPayment} className="flex gap-2"><input autoFocus value={paymentInput} onChange={e => setPaymentInput(e.target.value)} placeholder="pay 5 euro" className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none" /><button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs text-white">Pay</button></form>{paymentWrong && <p className="mt-2 text-xs text-red-400">Type “pay 5 euro” exactly.</p>}</div></div>
+        )}
+        {phase === 'paid' && (
+          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"><div className="rounded-2xl border border-green-400/30 px-4 pb-3 pt-3" style={{ background: 'rgba(0,0,0,0.92)' }}><span className="text-green-400 text-[9px] uppercase tracking-[0.12em] font-semibold">Shop complete</span><p className="my-2 text-white">Payment accepted. You completed the shop and unlocked new areas on the world map.</p><button onClick={onComplete} className="rounded-lg border border-green-400/40 bg-green-400/15 px-4 py-2 text-xs text-white">Return to map</button></div></div>
         )}
       </div>
     </div>

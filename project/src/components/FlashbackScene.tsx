@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ChevronRight, Volume2, TreePine, Armchair, Flower2, X, Zap, Check } from 'lucide-react';
 import { useLanguage } from '../i18n';
+import { assetUrl } from '../utils/assetUrl';
 
 interface FlashbackSceneProps {
   onComplete: () => void;
@@ -354,6 +355,18 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
     }
   };
 
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      if (step?.type === 'quiz') handleQuizAnswer(step.correctIndex);
+      else if (!animating) advance();
+      else handleClick();
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [step, animating, advance]);
+
   const isEmily = step?.type === 'dialogue' && step.speaker === 'emily';
   const isChaotic = step?.type === 'dialogue' && step.speaker === 'emily' && (step.text.includes('They are coming') || step.text.includes('They have weapons'));
   const isPanic = step?.type === 'dialogue' && step.speaker === 'you' && step.text.includes("What's going on");
@@ -363,7 +376,7 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
       <div className={`absolute inset-0 bg-[#0a0604] transition-opacity duration-1000 ${closing ? 'opacity-0' : 'opacity-100'}`}>
         {/* Background garden image */}
         <img
-          src="/Use_AI_Image_Jun_15,_2026,_19_20_35.png"
+          src={assetUrl('Use_AI_Image_Jun_15,_2026,_19_20_35.png')}
           onError={(e) => { (e.target as HTMLImageElement).src = 'https://images.pexels.com/photos/1179229/pexels-photo-1179229.jpeg?auto=compress&cs=tinysrgb&w=1920'; (e.target as HTMLImageElement).onerror = null; }}
           alt="Memory garden"
           className="absolute inset-0 w-full h-full object-cover"
@@ -375,7 +388,7 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
         <div className="absolute top-0 left-0 right-0 z-20 px-4 pt-3">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-[#e8d5a3] text-base font-bold font-display leading-none">Memorie Perdute</h1>
+              <h1 className="text-[#e8d5a3] text-base font-bold font-display leading-none">TaleTalk</h1>
               <div className="text-[#7cc4a0] text-xs uppercase tracking-widest mt-0.5">{isChinese ? '闪回 · 记忆' : 'Flashback — Memory'}</div>
             </div>
             <div className="flex items-center gap-2">

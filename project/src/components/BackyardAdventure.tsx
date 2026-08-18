@@ -3,6 +3,7 @@ import { Volume2, VolumeX, ArrowRight, Check, AlertTriangle, Sparkles } from 'lu
 import { useSpeech } from '../hooks/useSpeech';
 import { isSkipAnswer, stripAccents } from '../utils/levenshtein';
 import { useLanguage } from '../i18n';
+import { assetUrl } from '../utils/assetUrl';
 
 interface Scene {
   image: string;
@@ -15,7 +16,7 @@ interface Scene {
 
 const SCENES: Scene[] = [
   {
-    image: '/a1.png',
+    image: assetUrl('a1.png'),
     speaker: 'Narrator',
     speakerType: 'narrator',
     text: 'Deep within the heart of the small town of Elderwoods, on a sunny Sunday afternoon, sits Joshua Stilts. Not your everyday hero, but a man with his priorities straight: a cold beer in one hand and a smile on his face. Life is good.',
@@ -23,7 +24,7 @@ const SCENES: Scene[] = [
     spoken: 'Deep within the heart of the small town of Elderwoods, on a sunny Sunday afternoon, sits Joshua Stilts. Not your everyday hero, but a man with his priorities straight: a cold beer in one hand and a smile on his face. Life is good.',
   },
   {
-    image: '/a2.png',
+    image: assetUrl('a2.png'),
     speaker: 'Narrator',
     speakerType: 'narrator',
     text: 'But just at that moment, he hears crying.',
@@ -31,14 +32,14 @@ const SCENES: Scene[] = [
     spoken: 'But just at that moment, he hears crying.',
   },
   {
-    image: '/a2.png',
+    image: assetUrl('a2.png'),
     speaker: 'Bella',
     speakerType: 'girl',
     text: 'Wahhhhh!',
     spoken: 'Wahhhhh!',
   },
   {
-    image: '/a3.png',
+    image: assetUrl('a3.png'),
     speaker: 'Narrator',
     speakerType: 'narrator',
     text: 'He gets up to investigate the source of the commotion.',
@@ -46,7 +47,7 @@ const SCENES: Scene[] = [
     spoken: 'He gets up to investigate the source of the commotion.',
   },
   {
-    image: '/a4.png',
+    image: assetUrl('a4.png'),
     speaker: 'Narrator',
     speakerType: 'narrator',
     text: 'He follows the sound toward the back doors.',
@@ -54,7 +55,7 @@ const SCENES: Scene[] = [
     spoken: 'He follows the sound toward the back doors.',
   },
   {
-    image: '/scenes/bella/a5.png',
+    image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Josh',
     speakerType: 'narrator',
     text: 'Bella?',
@@ -62,14 +63,14 @@ const SCENES: Scene[] = [
     spoken: 'Bella?',
   },
   {
-    image: '/scenes/bella/a5.png',
+    image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Bella',
     speakerType: 'girl',
     text: 'Wahhhhh!',
     spoken: 'Wahhhhh!',
   },
   {
-    image: '/scenes/bella/a5.png',
+    image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Narrator',
     speakerType: 'narrator',
     text: "But try as he might, he isn't getting a word out of his daughter Bella.",
@@ -77,7 +78,7 @@ const SCENES: Scene[] = [
     spoken: "But try as he might, he isn't getting a word out of his daughter Bella.",
   },
   {
-    image: '/scenes/bella/a5.png',
+    image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Bella',
     speakerType: 'girl',
     text: 'I am unhappy.',
@@ -107,9 +108,9 @@ interface ChoiceOption {
 const CHOICES: ChoiceOption[] = [
   {
     id: 'gelato',
-    italianLabel: 'Would you like an ice cream?',
+    italianLabel: 'Ice cream',
     englishLabel: '你想要冰淇淋吗？',
-    prompt: 'would you like an ice cream',
+    prompt: 'ice cream',
     correct: true,
     responseIt: 'Yes!',
     responseEn: '她笑了，擦去眼泪。',
@@ -253,7 +254,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   const speakScene = useCallback((scene: Scene) => {
     const dialogue = isChinese ? (scene.textZh ?? scene.spoken ?? scene.text) : (scene.spoken ?? scene.text);
     if (scene.speakerType === 'girl') {
-      speak(dialogue, 'female');
+      speak(dialogue, 'bella');
     } else {
       speak(dialogue, 'male');
     }
@@ -264,7 +265,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   }, [sceneIndex, speakScene, isChinese]);
 
   useEffect(() => {
-    if (showWorried) speak(isChinese ? '他很担心，努力想别的办法。' : 'Worried, he tries to think of something else.', 'male');
+    if (showWorried) speak(isChinese ? '他很担心，努力想别的办法。' : 'Worried, he tries to think of something else.', 'adventure');
   }, [showWorried, isChinese, speak]);
 
   const advance = useCallback(() => {
@@ -276,6 +277,20 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
       setShowWordPuzzle(true);
     }
   }, [sceneIndex, cancel]);
+
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      if (chosenOption) { if (chosenOption.correct) onComplete(); else onMenu(); return; }
+      if (showChoices) { setChosenOption(CHOICES.find(choice => choice.correct) ?? null); return; }
+      if (showWordPuzzle) { setShowWordPuzzle(false); setShowChoices(true); return; }
+      if (showWorried) { setShowWorried(false); setShowChoices(true); return; }
+      advance();
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [advance, chosenOption, showChoices, showWordPuzzle, showWorried, onComplete, onMenu]);
 
   // Word puzzle: type "sono infelice"
   const wordPuzzleTarget = 'i am unhappy';
@@ -309,7 +324,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         return [...previous, ...SONO_INFELICE_WORDS.filter(word => !existing.has(word.word))];
       });
       setWordLibraryTutorial(true);
-      speak(isChinese ? '我不开心。' : 'I am unhappy', 'female');
+      speak(isChinese ? '我不开心。' : 'I am unhappy', 'bella');
       setWordPuzzleInput('');
       setTimeout(() => {
         setShowWordPuzzle(false);
@@ -340,14 +355,14 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         speak(match.prompt, 'male', () => {
           setSpeakingChoice(null);
           setChosenOption(match);
-          setTimeout(() => speak(match.responseIt, 'female'), 300);
+          setTimeout(() => speak(match.responseIt, 'bella'), 300);
         });
       } else {
         setShowWordPuzzle(false);
         setShowWorried(false);
         setShowChoices(false);
         setChosenOption(match);
-        speak('Waaaaah!', 'female');
+        speak('Waaaaah!', 'bella');
       }
     } else {
       setTypingWrong(true);
@@ -913,7 +928,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         {chosenOption && (
           chosenOption.correct ? (
             <img
-              src="/scenes/bella/a6.png"
+              src={assetUrl('scenes/bella/a6.png')}
               alt="Bella happy with gelato"
               className="absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-700"
               draggable={false}

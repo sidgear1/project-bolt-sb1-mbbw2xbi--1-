@@ -1,7 +1,7 @@
-import { useState, useRef, Component } from 'react';
+import { useState, Component } from 'react';
 import { Screen, GamePhase, DictionaryWord } from './types';
 import { useSave } from './hooks/useSave';
-import { useAmbientAudio } from './hooks/useAudio';
+import { useCafeMusic } from './hooks/useAudio';
 import MainMenu from './components/MainMenu';
 import Game from './components/Game';
 import { useLanguage } from './i18n';
@@ -31,6 +31,7 @@ interface GameStartConfig {
 export default function App() {
   const { isChinese } = useLanguage();
   const [screen, setScreen] = useState<Screen>('menu');
+  const [gameSession, setGameSession] = useState(0);
   const [gameConfig, setGameConfig] = useState<GameStartConfig>({
     phase: 'tied',
     learnedWords: [],
@@ -42,16 +43,10 @@ export default function App() {
   });
 
   const { load, deleteSave } = useSave();
-  const { start: startAudio, stop: stopAudio, fadeOut: fadeAudio } = useAmbientAudio();
-  const adventureAudioTimer = useRef<number | null>(null);
+  const { start: startAudio, stop: stopAudio, fadeOut: fadeAudio } = useCafeMusic();
 
   const startAdventureAudio = () => {
-    if (adventureAudioTimer.current !== null) window.clearTimeout(adventureAudioTimer.current);
     startAudio();
-    adventureAudioTimer.current = window.setTimeout(() => {
-      stopAudio();
-      adventureAudioTimer.current = null;
-    }, 5000);
   };
 
   const handleNewGame = async (startPhase?: GamePhase) => {
@@ -59,6 +54,7 @@ export default function App() {
     stopAudio();
     setGameConfig({ phase: startPhase ?? 'tied', learnedWords: [], inventory: [], dictionary: [], showIntro: true, xp: 0, combatCleared: false });
     startAdventureAudio();
+    setGameSession(session => session + 1);
     setScreen('game');
   };
 
@@ -79,16 +75,17 @@ export default function App() {
       setGameConfig({ phase: 'tied', learnedWords: [], inventory: [], dictionary: [], showIntro: true, xp: 0, combatCleared: false });
     }
     startAdventureAudio();
+    setGameSession(session => session + 1);
     setScreen('game');
   };
 
   const handleReturnToMenu = () => {
-    if (adventureAudioTimer.current !== null) window.clearTimeout(adventureAudioTimer.current);
     stopAudio();
     setScreen('menu');
   };
 
   const languageHint = <div className="fixed bottom-3 right-3 z-[100] rounded-full border border-white/15 bg-black/70 px-3 py-1.5 text-[10px] tracking-wide text-white/75 backdrop-blur-sm">{isChinese ? '中文 · 按 L 查看英文' : 'English · Press L for Chinese'}</div>;
+  const copyrightNotice = <div className="fixed bottom-3 left-3 z-[100] rounded-full border border-white/15 bg-black/70 px-3 py-1.5 text-[10px] tracking-wide text-white/75 backdrop-blur-sm">© 2026 TaleTalk. All rights reserved.</div>;
 
   if (screen === 'game') {
     return (
@@ -101,6 +98,7 @@ export default function App() {
         </div>
       }>
         <Game
+          key={gameSession}
           initialPhase={gameConfig.phase}
           initialLearnedWords={gameConfig.learnedWords}
           initialInventory={gameConfig.inventory}
@@ -111,9 +109,9 @@ export default function App() {
           onMenu={handleReturnToMenu}
           onFadeAudio={() => fadeAudio(4)}
         />
-      </ErrorBoundary>{languageHint}</>
+      </ErrorBoundary>{copyrightNotice}{languageHint}</>
     );
   }
 
-  return <><MainMenu onNewGame={handleNewGame} onContinue={handleContinue} onStartAudio={startAudio} onStopAudio={stopAudio} />{languageHint}</>;
+  return <><MainMenu onNewGame={handleNewGame} onContinue={handleContinue} onStartAudio={startAudio} />{copyrightNotice}{languageHint}</>;
 }

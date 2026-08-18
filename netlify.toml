@@ -1,0 +1,11 @@
+[build]
+  # The Vite application lives in this subfolder, not at the repository root.
+  base = "project"
+  command = "npm run build"
+  publish = "dist"
+
+# Serve the React app for direct visits to any client-side route.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

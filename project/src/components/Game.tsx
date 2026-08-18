@@ -17,6 +17,7 @@ import FlashbackScene from './FlashbackScene';
 import ParisStreetScene from './ParisStreetScene';
 import { englishTerm } from '../learningLanguage';
 import { useLanguage } from '../i18n';
+import { assetUrl } from '../utils/assetUrl';
 
 type CombatPhaseType = 'none' | 'intro' | 'player_turn' | 'enemy_turn' | 'victory' | 'cleared';
 
@@ -75,11 +76,11 @@ function computeStats(level: number, currentHp: number): PlayerStats {
 
 function sceneImage(phase: GamePhase, combatPhase: CombatPhaseType): string {
   if (combatPhase === 'intro' || combatPhase === 'player_turn' || combatPhase === 'enemy_turn') {
-    return '/man_in_g.png';
+    return assetUrl('man_in_g.png');
   }
-  if (combatPhase === 'victory' || combatPhase === 'cleared') return '/man_in_g_on_floor.png';
-  if (phase === 'tied' || phase === 'has_knife') return '/cafe_room.png';
-  return '/ChatGPT_Image_Jun_14,_2026,_05_36_59_PM.png';
+  if (combatPhase === 'victory' || combatPhase === 'cleared') return assetUrl('man_in_g_on_floor.png');
+  if (phase === 'tied' || phase === 'has_knife') return assetUrl('cafe_room.png');
+  return assetUrl('ChatGPT_Image_Jun_14,_2026,_05_36_59_PM.png');
 }
 
 export default function Game({
@@ -206,6 +207,23 @@ export default function Game({
     window.addEventListener('keydown', handler, { capture: true });
     return () => window.removeEventListener('keydown', handler, { capture: true });
   }, [jumpToScene]);
+
+  // Right Arrow is the player-friendly progression shortcut: it advances to
+  // the next chapter state using the successful path rather than requiring a
+  // debug command or repeated object clicks.
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowRight') return;
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      event.preventDefault();
+      if (phase === 'tied') jumpToScene(2);
+      else if (phase === 'flashback') jumpToScene(3);
+      else if (phase === 'paris_street') setChapterDone(true);
+    };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  }, [phase, jumpToScene]);
 
   // Debug mode toggle — # key (ignored when typing in an input)
   useEffect(() => {
@@ -665,15 +683,15 @@ export default function Game({
             {/* Title + phase */}
             <div className="min-w-0">
               <h1 className="text-[#e8d5a3] text-base font-bold font-display leading-none">
-                Memorie Perdute
+                TaleTalk
               </h1>
               <div className="text-[#c4b080] text-xs uppercase tracking-widest mt-0.5">
-                {phase === 'tied' && 'Mani legate (Hands bound)'}
-                {phase === 'has_knife' && 'Armato (Armed)'}
-                {(phase === 'freed' || phase === 'has_key') && !inCombat && 'Mani libere (Hands free)'}
-                {inCombat && <span className="text-red-400">Combattimento</span>}
-                {phase === 'has_key' && !inCombat && ' — Chiave trovata'}
-                {phase === 'escaped' && 'Libero! (Free!)'}
+                {phase === 'tied' && 'Hands bound'}
+                {phase === 'has_knife' && 'Armed'}
+                {(phase === 'freed' || phase === 'has_key') && !inCombat && 'Hands free'}
+                {inCombat && <span className="text-red-400">Combat</span>}
+                {phase === 'has_key' && !inCombat && ' — Key found'}
+                {phase === 'escaped' && 'Free!'}
               </div>
             </div>
 

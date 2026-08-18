@@ -52,6 +52,12 @@ export default function IntroSequence({ onComplete, speak, cancel }: IntroSequen
     }
   };
 
+  useEffect(() => {
+    const skip = (event: KeyboardEvent) => { if (event.key === 'ArrowRight') { event.preventDefault(); handleClick(); } };
+    window.addEventListener('keydown', skip);
+    return () => window.removeEventListener('keydown', skip);
+  });
+
   return (
     <div
       className="absolute inset-0 z-40 flex flex-col items-center justify-end pb-16 cursor-pointer"
