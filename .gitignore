@@ -21,3 +21,8 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Local browser test profiles — never part of the app.
+.chrome-test/
+.chrome-video-test/
+.chrome-word-test/
