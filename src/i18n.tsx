@@ -16,13 +16,17 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() !== 'l') return;
-      const active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      // Semicolon is the universal language key, including maps and every adventure.
+      // `key` varies on some keyboard layouts; `code` keeps the language
+      // shortcut dependable everywhere, including interactive story scenes.
+      if (event.key !== ';' && event.code !== 'Semicolon') return;
+      if (event.repeat) return;
+      event.preventDefault();
+      event.stopPropagation();
       toggleLanguage();
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener('keydown', handler, { capture: true });
+    return () => window.removeEventListener('keydown', handler, { capture: true });
   }, []);
 
   return <LanguageContext.Provider value={{ language, isChinese: language === 'zh', toggleLanguage }}>{children}</LanguageContext.Provider>;

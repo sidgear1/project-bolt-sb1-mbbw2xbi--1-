@@ -241,7 +241,9 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const step = STEPS[stepIndex];
-  const displayDialogue = step?.type === 'dialogue' ? (isChinese ? (FLASHBACK_CHINESE[step.text] ?? step.text) : step.text) : '';
+  // The flashback is an English-learning scene. `speakText` is the clean
+  // English source for both narration and audio, regardless of app language.
+  const displayDialogue = step?.type === 'dialogue' ? (step.speakText ?? step.text) : '';
 
   const advance = useCallback(() => {
     const next = stepIndex + 1;
@@ -498,7 +500,7 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
                   <div className="w-2 h-2 rounded-full bg-[#7cc4a0] animate-pulse" />
                   <span className="text-[#7cc4a0] text-xs uppercase tracking-widest font-medium">{isChinese ? '艾米丽说：' : 'Emily said...'}</span>
                 </div>
-                <p className="text-[#f0e8d8] text-base font-display italic mb-4">{step.englishText}</p>
+                <p className="text-[#f0e8d8] text-base font-display italic mb-4">{step.frenchText}</p>
                 <div className="text-[#8b6914]/60 text-xs uppercase tracking-wider mb-2">她说了哪一句英语？点击作答：</div>
                 {!quizDone ? (
                   <div className="flex flex-col gap-2">

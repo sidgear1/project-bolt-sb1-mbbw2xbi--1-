@@ -6,7 +6,7 @@ const SESSION_KEY = 'memoire_perdue_session';
 const ACTIVE_SLOT_KEY = 'taletalk_active_save_slot';
 const slotKey = (slot: number) => `taletalk-save-slot-${slot}`;
 
-export interface SaveSlot { slot: number; name: string | null; avatar: string | null; updatedAt: string | null; phase: GamePhase | null; }
+export interface SaveSlot { slot: number; name: string | null; avatar: string | null; updatedAt: string | null; phase: GamePhase | null; playTimeSeconds: number; }
 
 function getSessionId(): string {
   let id = localStorage.getItem(SESSION_KEY);
@@ -19,17 +19,17 @@ function getSessionId(): string {
 
 export function useSave() {
   const getActiveSlot = () => Number(localStorage.getItem(ACTIVE_SLOT_KEY) ?? '1');
-  const selectSlot = useCallback((slot: number) => { localStorage.setItem(ACTIVE_SLOT_KEY, String(Math.min(6, Math.max(1, slot)))); }, []);
-  const listSlots = useCallback((): SaveSlot[] => Array.from({ length: 6 }, (_, index) => {
+  const selectSlot = useCallback((slot: number) => { localStorage.setItem(ACTIVE_SLOT_KEY, String(Math.min(10, Math.max(1, slot)))); }, []);
+  const listSlots = useCallback((): SaveSlot[] => Array.from({ length: 10 }, (_, index) => {
     const slot = index + 1;
-    try { const saved = JSON.parse(localStorage.getItem(slotKey(slot)) ?? 'null') as (SaveData & { name?: string; avatar?: string; updatedAt?: string }) | null; return { slot, name: saved?.name ?? null, avatar: saved?.avatar ?? null, updatedAt: saved?.updatedAt ?? null, phase: saved?.phase ?? null }; } catch { return { slot, name: null, avatar: null, updatedAt: null, phase: null }; }
+    try { const saved = JSON.parse(localStorage.getItem(slotKey(slot)) ?? 'null') as (SaveData & { name?: string; avatar?: string; updatedAt?: string; playTimeSeconds?: number }) | null; return { slot, name: saved?.name ?? null, avatar: saved?.avatar ?? null, updatedAt: saved?.updatedAt ?? null, phase: saved?.phase ?? null, playTimeSeconds: saved?.playTimeSeconds ?? 0 }; } catch { return { slot, name: null, avatar: null, updatedAt: null, phase: null, playTimeSeconds: 0 }; }
   }), []);
   const nameSlot = useCallback((slot: number, name: string, avatar: string | null) => { const previous = JSON.parse(localStorage.getItem(slotKey(slot)) ?? '{}'); localStorage.setItem(slotKey(slot), JSON.stringify({ ...previous, name, avatar, updatedAt: new Date().toISOString() })); }, []);
   const removeSlot = useCallback((slot: number) => localStorage.removeItem(slotKey(slot)), []);
   const save = useCallback(async (data: SaveData) => {
     try {
       const previous = JSON.parse(localStorage.getItem(slotKey(getActiveSlot())) ?? '{}');
-      localStorage.setItem(slotKey(getActiveSlot()), JSON.stringify({ ...data, name: previous.name, avatar: previous.avatar, updatedAt: new Date().toISOString() }));
+      localStorage.setItem(slotKey(getActiveSlot()), JSON.stringify({ ...data, name: previous.name, avatar: previous.avatar, playTimeSeconds: previous.playTimeSeconds ?? 0, updatedAt: new Date().toISOString() }));
       // The older cloud row has one session id, so reserve it for the legacy
       // first save only. Slots 2–6 must never read/write another slot's state.
       if (!supabase || getActiveSlot() !== 1) return;
@@ -112,5 +112,14 @@ export function useSave() {
     }
   }, []);
 
-  return { save, load, deleteSave, hasSave, selectSlot, listSlots, nameSlot, removeSlot, getActiveSlot };
+  const addPlayTime = useCallback((seconds: number) => {
+    const slot = getActiveSlot();
+    try {
+      const previous = JSON.parse(localStorage.getItem(slotKey(slot)) ?? 'null');
+      if (!previous?.name) return;
+      localStorage.setItem(slotKey(slot), JSON.stringify({ ...previous, playTimeSeconds: (previous.playTimeSeconds ?? 0) + seconds, updatedAt: new Date().toISOString() }));
+    } catch { /* A timer must never interrupt the game. */ }
+  }, []);
+
+  return { save, load, deleteSave, hasSave, selectSlot, listSlots, nameSlot, removeSlot, getActiveSlot, addPlayTime };
 }

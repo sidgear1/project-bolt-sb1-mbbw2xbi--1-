@@ -36,6 +36,7 @@ const SCENES: Scene[] = [
     speaker: 'Bella',
     speakerType: 'girl',
     text: 'Wahhhhh!',
+    textZh: '哇啊啊！',
     spoken: 'Wahhhhh!',
   },
   {
@@ -67,6 +68,7 @@ const SCENES: Scene[] = [
     speaker: 'Bella',
     speakerType: 'girl',
     text: 'Wahhhhh!',
+    textZh: '哇啊啊！',
     spoken: 'Wahhhhh!',
   },
   {
@@ -108,41 +110,14 @@ interface ChoiceOption {
 const CHOICES: ChoiceOption[] = [
   {
     id: 'gelato',
-    italianLabel: 'Ice cream',
+    italianLabel: 'ice cream?',
     englishLabel: '你想要冰淇淋吗？',
-    prompt: 'ice cream',
+    prompt: 'ice cream?',
     correct: true,
-    responseIt: 'Yes!',
+    responseIt: 'Okay!',
     responseEn: '她笑了，擦去眼泪。',
     wordTooltips: [
-      { word: 'Would you like', translation: '你想要吗' },
-      { word: 'an', translation: '一个' },
-      { word: 'ice cream', translation: '冰淇淋' },
-    ],
-  },
-  {
-    id: 'ignore',
-    italianLabel: 'Ignore her',
-    englishLabel: '忽略她',
-    prompt: 'ignore her',
-    correct: false,
-    responseIt: '*Bella cries louder*',
-    responseEn: '她感到被抛弃，哭得更厉害。',
-    wordTooltips: [
-      { word: 'Ignore her', translation: '忽略她' },
-    ],
-  },
-  {
-    id: 'shout',
-    italianLabel: 'Shout at her',
-    englishLabel: '对她大喊',
-    prompt: 'shout at her',
-    correct: false,
-    responseIt: '*Bella cries louder*',
-    responseEn: '你的喊叫让她更害怕。',
-    wordTooltips: [
-      { word: 'Shout', translation: '大喊' },
-      { word: 'at her', translation: '对她' },
+      { word: 'ice cream?', translation: '冰淇淋' },
     ],
   },
 ];
@@ -150,6 +125,15 @@ const CHOICES: ChoiceOption[] = [
 interface Props {
   onMenu: () => void;
   onComplete: () => void;
+}
+
+const STAND_UP_WORD: WordTooltip = { word: 'stand up', translation: '起身' };
+
+function stopGardenAmbience() {
+  document.querySelectorAll<HTMLAudioElement>('audio[data-garden-ambience="true"]').forEach(audio => {
+    audio.pause();
+    audio.currentTime = 0;
+  });
 }
 
 const SONO_INFELICE_WORDS: WordTooltip[] = [
@@ -160,7 +144,11 @@ const SONO_INFELICE_WORDS: WordTooltip[] = [
 export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   const { isChinese } = useLanguage();
   const [sceneIndex, setSceneIndex] = useState(0);
+  const [visibleSceneImage, setVisibleSceneImage] = useState(SCENES[0].image);
   const [showWordPuzzle, setShowWordPuzzle] = useState(false);
+  const [showStandUpPuzzle, setShowStandUpPuzzle] = useState(false);
+  const [standUpInput, setStandUpInput] = useState('');
+  const [standUpWrong, setStandUpWrong] = useState(false);
   const [wordPuzzleInput, setWordPuzzleInput] = useState('');
   const [wordPuzzleWrong, setWordPuzzleWrong] = useState(false);
   const [wordPuzzleDone, setWordPuzzleDone] = useState(false);
@@ -184,8 +172,35 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   const [debugPoints, setDebugPoints] = useState<{ x: number; y: number }[]>([]);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const sceneRef = useRef<HTMLDivElement>(null);
+  const gardenAudioRef = useRef<HTMLAudioElement>(null);
   const { speak, cancel, enabled: speechEnabled, toggle: toggleSpeech } = useSpeech();
   const keyBufferRef = useRef('');
+
+  // Fetch every scene before the player can advance, avoiding black frames on slower hosts.
+  useEffect(() => {
+    SCENES.forEach(scene => { const image = new Image(); image.src = scene.image; });
+  }, []);
+
+  // Only the “gets up” narration plays the full movement. The frames are
+  // character-only layers, so every frame sits over the exact same garden.
+
+  // Scene-one ambience is a local MP3. Try as soon as this scene mounts and again
+  // after it has buffered; the first player click below is the browser-safe fallback.
+  useEffect(() => {
+    const audio = gardenAudioRef.current;
+    if (!audio) return;
+    stopGardenAmbience();
+    audio.volume = 0.38;
+    const startMusic = () => { void audio.play().catch(() => undefined); };
+    audio.addEventListener('canplay', startMusic, { once: true });
+    startMusic();
+    return () => {
+      audio.removeEventListener('canplay', startMusic);
+      audio.pause();
+      audio.currentTime = 0;
+      stopGardenAmbience();
+    };
+  }, []);
 
   // /1 shortcut — skip to end of scene (choices)
   useEffect(() => {
@@ -209,12 +224,12 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   }, [cancel]);
 
   useEffect(() => {
-    if (!chosenOption && !showChoices && !showWordPuzzle && !showWorried) return;
+    if (!chosenOption && !showChoices && !showWordPuzzle && !showStandUpPuzzle && !showWorried) return;
     if (chosenOption?.correct) {
       setShowWordPuzzle(false);
       setShowWorried(false);
     }
-  }, [chosenOption, showChoices, showWordPuzzle, showWorried]);
+  }, [chosenOption, showChoices, showWordPuzzle, showStandUpPuzzle, showWorried]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -251,8 +266,27 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
   const currentScene = SCENES[sceneIndex];
 
+  // Never remove the current art until the next scene has decoded. This keeps
+  // scene one smooth even on slower devices and prevents a coloured blank flash.
+  useEffect(() => {
+    if (currentScene.image === visibleSceneImage) return;
+    let active = true;
+    const image = new Image();
+    const reveal = async () => {
+      try { await image.decode(); } catch { /* it can still be painted */ }
+      if (active) setVisibleSceneImage(currentScene.image);
+    };
+    image.onload = reveal;
+    image.onerror = reveal;
+    image.src = currentScene.image;
+    return () => { active = false; };
+  }, [currentScene.image, visibleSceneImage]);
+
   const speakScene = useCallback((scene: Scene) => {
-    const dialogue = isChinese ? (scene.textZh ?? scene.spoken ?? scene.text) : (scene.spoken ?? scene.text);
+    // Narration follows the selected language. The learning dialogue spoken
+    // by Bella and Josh remains English for practice.
+    const characterSpeaksEnglish = scene.speaker === 'Bella' || scene.speaker === 'Josh';
+    const dialogue = characterSpeaksEnglish ? (scene.spoken ?? scene.text) : (isChinese ? (scene.textZh ?? scene.spoken ?? scene.text) : (scene.spoken ?? scene.text));
     if (scene.speakerType === 'girl') {
       speak(dialogue, 'bella');
     } else {
@@ -261,15 +295,37 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   }, [isChinese, speak]);
 
   useEffect(() => {
-    speakScene(currentScene);
+    // Let the new art paint before the narration begins, preventing speech
+    // from starting while the previous scene is still visible.
+    const timer = window.setTimeout(() => speakScene(currentScene), 320);
+    return () => window.clearTimeout(timer);
   }, [sceneIndex, speakScene, isChinese]);
 
   useEffect(() => {
     if (showWorried) speak(isChinese ? '他很担心，努力想别的办法。' : 'Worried, he tries to think of something else.', 'adventure');
   }, [showWorried, isChinese, speak]);
 
+  const completeStandUp = () => {
+    const slot = Number(localStorage.getItem('taletalk_active_save_slot') ?? '1');
+    const key = `taletalk-slot-${slot}-unlocked-words`;
+    const savedWords = new Set<string>(JSON.parse(localStorage.getItem(key) ?? '[]'));
+    savedWords.add(STAND_UP_WORD.word);
+    localStorage.setItem(key, JSON.stringify([...savedWords].sort()));
+    setUnlockedWords(previous => previous.some(word => word.word === STAND_UP_WORD.word) ? previous : [...previous, STAND_UP_WORD]);
+    setWordLibraryTutorial(true);
+    setStandUpInput('');
+    setShowStandUpPuzzle(false);
+    setSceneIndex(3);
+  };
+
   const advance = useCallback(() => {
     cancel();
+    if (sceneIndex === 2) {
+      // Scene one progresses directly into the garden; "stand up" is no
+      // longer a required typing exercise.
+      setSceneIndex(3);
+      return;
+    }
     if (sceneIndex < SCENES.length - 1) {
       setSceneIndex(sceneIndex + 1);
     } else {
@@ -285,12 +341,13 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
       if (chosenOption) { if (chosenOption.correct) onComplete(); else onMenu(); return; }
       if (showChoices) { setChosenOption(CHOICES.find(choice => choice.correct) ?? null); return; }
       if (showWordPuzzle) { setShowWordPuzzle(false); setShowChoices(true); return; }
+      if (showStandUpPuzzle) { completeStandUp(); return; }
       if (showWorried) { setShowWorried(false); setShowChoices(true); return; }
       advance();
     };
     window.addEventListener('keydown', skip);
     return () => window.removeEventListener('keydown', skip);
-  }, [advance, chosenOption, showChoices, showWordPuzzle, showWorried, onComplete, onMenu]);
+  }, [advance, chosenOption, completeStandUp, showChoices, showWordPuzzle, showStandUpPuzzle, showWorried, onComplete, onMenu]);
 
   // Word puzzle: type "sono infelice"
   const wordPuzzleTarget = 'i am unhappy';
@@ -324,7 +381,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         return [...previous, ...SONO_INFELICE_WORDS.filter(word => !existing.has(word.word))];
       });
       setWordLibraryTutorial(true);
-      speak(isChinese ? '我不开心。' : 'I am unhappy', 'bella');
+      speak('I am unhappy', 'bella');
       setWordPuzzleInput('');
       setTimeout(() => {
         setShowWordPuzzle(false);
@@ -335,6 +392,17 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
       setWordPuzzleWrong(true);
       setTimeout(() => setWordPuzzleWrong(false), 1500);
     }
+  };
+
+  const handleStandUpSubmit = () => {
+    const normalized = stripAccents(standUpInput.toLowerCase().replace(/\s+/g, ' ').trim());
+    if (normalized !== STAND_UP_WORD.word) {
+      setStandUpWrong(true);
+      setTimeout(() => setStandUpWrong(false), 1500);
+      return;
+    }
+
+    completeStandUp();
   };
 
   const handleChoiceSubmit = () => {
@@ -350,7 +418,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         setSpeakingChoice(match);
         setUnlockedWords(previous => {
           const existing = new Set(previous.map(word => word.word));
-          return [...previous, ...(match.wordTooltips || []).filter(word => !existing.has(word.word))];
+          return [...previous, ...(match.wordTooltips || []).filter(word => word.word === 'ice cream?' && !existing.has(word.word))];
         });
         speak(match.prompt, 'male', () => {
           setSpeakingChoice(null);
@@ -403,23 +471,34 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
   return (
     <div
-      className="fixed inset-0 bg-black overflow-hidden flex items-center justify-center"
+      className="fixed inset-0 flex select-none items-center justify-center overflow-hidden bg-black"
+      style={{ WebkitTapHighlightColor: 'transparent', userSelect: 'none' }}
       onClick={() => {
-        if (!showChoices && !chosenOption && !showWordPuzzle && !showWorried) advance();
+        // Browsers permit unmuted ambience after this direct player action.
+        gardenAudioRef.current?.play().catch(() => { /* the next click can retry */ });
+        if (!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried) advance();
       }}
     >
       <div
         ref={sceneRef}
-        className="relative"
-        style={{ height: '100vh', aspectRatio: '1 / 1', maxWidth: '100vw', maxHeight: '100vh' }}
+        className="relative h-full w-full"
         onMouseMove={handleSceneMouseMove}
       >
         <img
-          key={currentScene.image + sceneIndex}
-          src={currentScene.image}
+          src={visibleSceneImage}
           alt="Backyard scene"
           className="absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-700"
           draggable={false}
+        />
+        <audio
+          ref={gardenAudioRef}
+          src="/audio/garden-scene-music.mp3"
+          data-garden-ambience="true"
+          autoPlay
+          loop
+          preload="auto"
+          playsInline
+          onCanPlay={event => { event.currentTarget.volume = 0.38; }}
         />
         <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(180deg, rgba(0,0,0,0.55) 0%, transparent 30%, transparent 55%, rgba(0,0,0,0.85) 100%)' }} />
 
@@ -443,7 +522,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                 {speechEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
               </button>
               <button
-                onClick={() => { cancel(); onMenu(); }}
+                onClick={() => { stopGardenAmbience(); cancel(); onMenu(); }}
                 className="px-4 py-2 rounded-full text-[11px] bg-black/60 border border-white/20 hover:border-white/50 text-white/80 hover:text-white transition-all uppercase tracking-wider"
               >
                 {isChinese ? '菜单' : 'Menu'}
@@ -509,10 +588,26 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
           </div>
         )}
 
+        {showStandUpPuzzle && !chosenOption && (
+          <div className="absolute inset-0 z-30 flex items-end justify-center bg-black/35 p-5 pb-10" onClick={event => event.stopPropagation()}>
+            <form onSubmit={event => { event.preventDefault(); handleStandUpSubmit(); }} className="w-full max-w-lg rounded-2xl border border-[#c4942a]/50 bg-[#120d08]/95 p-5 shadow-2xl">
+              <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#e9bd60]">Your action</div>
+              <h2 className="text-2xl text-white" style={{ fontFamily: "'Playfair Display', serif" }}>What does Joshua do?</h2>
+              <p className="mt-1 text-sm text-white/60">Type the English words to make him get out of the hammock.</p>
+              <div className="mt-4 rounded-lg bg-white/5 px-3 py-2 text-xl font-medium text-white">stand up</div>
+              <div className="mt-3 flex gap-2">
+                <input autoFocus value={standUpInput} onChange={event => setStandUpInput(event.target.value)} placeholder="type the English words" className="min-w-0 flex-1 rounded-lg border border-white/20 bg-black/35 px-3 py-2.5 text-white outline-none focus:border-[#e9bd60]" />
+                <button className="rounded-lg bg-[#c4942a] px-4 py-2 text-sm font-semibold text-black transition hover:bg-[#e9bd60]">Stand up</button>
+              </div>
+              {standUpWrong && <p className="mt-2 text-sm text-red-300">Try again: type “stand up”.</p>}
+            </form>
+          </div>
+        )}
+
         {/* Cinematic dialogue bar */}
-        {!showChoices && !chosenOption && !showWordPuzzle && !showWorried && !speakingChoice && (
+        {!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried && !speakingChoice && (
           <div className="absolute bottom-0 left-0 right-0 z-20">
-            <div className="px-6 pb-5 pt-8" style={{ background: 'linear-gradient(0deg, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.7) 70%, transparent 100%)' }}>
+            <div className="px-6 pb-5 pt-8" style={{ background: 'linear-gradient(0deg, rgba(8,27,67,0.34) 0%, rgba(8,27,67,0.12) 70%, transparent 100%)' }}>
               <div className="max-w-lg mx-auto">
                 <div className="flex items-center gap-2.5 mb-2">
                   <div
@@ -552,7 +647,9 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                   </div>
                 ) : (
                   <p className="text-white text-2xl leading-snug" style={{ fontFamily: "'Playfair Display', serif" }}>
-                    {isChinese ? (currentScene.textZh || currentScene.text) : currentScene.text}
+                    {currentScene.speaker === 'Bella' || currentScene.speaker === 'Josh'
+                      ? currentScene.text
+                      : (isChinese ? (currentScene.textZh || currentScene.text) : currentScene.text)}
                   </p>
                 )}
 
@@ -676,7 +773,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         {/* Worried narrator interstitial */}
         {showWorried && !chosenOption && (
           <div className="absolute bottom-0 left-0 right-0 z-20" onClick={() => { setShowWorried(false); setShowChoices(true); }}>
-            <div className="px-6 pb-5 pt-8" style={{ background: 'linear-gradient(0deg, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.7) 70%, transparent 100%)' }}>
+            <div className="px-6 pb-5 pt-8" style={{ background: 'linear-gradient(0deg, rgba(8,27,67,0.34) 0%, rgba(8,27,67,0.12) 70%, transparent 100%)' }}>
               <div className="max-w-lg mx-auto">
                 <div className="flex items-center gap-2.5 mb-2">
                   <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: '#ccc' }} />
@@ -702,7 +799,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                   <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
                   <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">{isChinese ? '你会怎么做？' : 'What do you do?'}</span>
                 </div>
-                <p className="text-white/80 text-xs mb-1.5">{isChinese ? '贝拉在哭。输入你想做的事：' : 'Bella is crying. Type what you want to do:'}</p>
+                <p className="text-white/80 text-xs mb-1.5">{isChinese ? '贝拉在哭。试着输入你想给她买的东西：' : 'Bella is crying. Try typing something to buy for her:'}</p>
 
                 <div className="flex flex-col gap-1 mb-2">
                   {CHOICES.map((c) => {
@@ -955,7 +1052,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                   </div>
                 )}
                 <button
-                  onClick={() => { cancel(); chosenOption.correct ? onComplete() : onMenu(); }}
+                  onClick={() => { stopGardenAmbience(); cancel(); chosenOption.correct ? onComplete() : onMenu(); }}
                   className="mt-2 flex items-center gap-1.5 text-white/70 hover:text-white text-[10px] uppercase tracking-wider transition-colors"
                 >
                   {isChinese ? '返回地图' : 'Return to map'} <ArrowRight size={12} />

@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { assetUrl } from '../utils/assetUrl';
 
 /** Plays the opening-cafe music until the intro sequence ends. */
-export function useCafeMusic() {
+export function useCafeMusic(muted = false) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const stop = useCallback(() => {
@@ -13,9 +13,12 @@ export function useCafeMusic() {
   const start = useCallback(() => {
     if (audioRef.current) return;
     const audio = new Audio(assetUrl('music/silent-tension.mp3'));
-    audio.loop = true; audio.volume = 0.3; audioRef.current = audio;
+    audio.loop = true; audio.volume = muted ? 0 : 0.3; audioRef.current = audio;
     audio.play().then(() => setPlaying(true)).catch(() => { /* a player interaction may be required */ });
-  }, []);
+  }, [muted]);
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = muted ? 0 : 0.3;
+  }, [muted]);
   const fadeOut = useCallback((durationSecs = 3) => {
     const audio = audioRef.current;
     if (!audio) return;

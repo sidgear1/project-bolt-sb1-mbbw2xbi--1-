@@ -1,4 +1,4 @@
-import { Sword, Zap, Package } from 'lucide-react';
+import { Crosshair, Shield, Zap, Package } from 'lucide-react';
 import { PlayerStats } from './StatsPanel';
 import { useLanguage } from '../i18n';
 
@@ -13,6 +13,8 @@ interface CombatPanelProps {
   combatLog: string[];
   stats: PlayerStats;
   onAttack: () => void;
+  onParry: () => void;
+  parryReady: boolean;
 }
 
 const ENEMY_MAX_HP = 20;
@@ -74,6 +76,8 @@ export default function CombatPanel({
   combatLog,
   stats,
   onAttack,
+  onParry,
+  parryReady,
 }: CombatPanelProps) {
   const { isChinese } = useLanguage();
   const isPlayerTurn = combatPhase === 'player_turn';
@@ -87,6 +91,7 @@ export default function CombatPanel({
   const enemyHpBar = { x: 2, y: 10.4, width: 19.6, height: 8.6 };
 
   if (combatPhase === 'intro') {
+    return null;
     return (
       <>
         {/* Floating HP bars even in intro */}
@@ -125,7 +130,7 @@ export default function CombatPanel({
                   <div>
                     <span className="text-[#8b6914]/70 text-xs">{isChinese ? '他：' : 'You:'}</span>
                     <p className="text-[#f0e8d8] text-sm font-mono italic mt-0.5">
-                      "I don't understand..."
+                      ""
                     </p>
                   </div>
                 </div>
@@ -228,6 +233,7 @@ export default function CombatPanel({
             <div className="text-[#8b6914]/60 text-[10px] uppercase tracking-widest mb-2">
               {isPlayerTurn ? (isChinese ? '轮到他了——选择一个动作：' : 'Your turn — choose an action:') : (isChinese ? '敌人正在攻击…' : 'Enemy attacking...')}
             </div>
+            {isPlayerTurn && <p className="mb-2 text-xs text-yellow-200">Click the yellow Parry bubble before the enemy attacks: it reduces their 10 damage hit to 3.</p>}
             <div className="flex gap-2">
               <button
                 onClick={onAttack}
@@ -238,9 +244,23 @@ export default function CombatPanel({
                     : 'bg-[#1a0808]/50 border-red-900/20 text-red-900/50 cursor-not-allowed'
                 }`}
               >
-                <Sword size={13} />
-                <span>{isChinese ? '攻击' : 'Attack'}</span>
+                <Crosshair size={13} />
+                <span>{isChinese ? '射击' : 'Shoot'}</span>
                 <span className="text-[10px] opacity-60 ml-1">{stats.damageMin}–{stats.damageMax} dmg</span>
+              </button>
+
+              <button
+                onClick={onParry}
+                disabled={!isPlayerTurn}
+                className={`flex items-center gap-2 rounded-full px-4 py-2 text-xs font-extrabold border-2 transition-all ${
+                  isPlayerTurn
+                    ? 'bg-yellow-300 border-yellow-100 text-slate-950 shadow-[0_0_20px_rgba(250,204,21,.7)] hover:bg-yellow-200 cursor-pointer'
+                    : 'bg-yellow-900/30 border-yellow-900/30 text-yellow-900/50 cursor-not-allowed'
+                }`}
+                title="Parry the next hit: 10 damage becomes 3"
+              >
+                <Shield size={14} />
+                <span>{parryReady ? 'Parry ready' : 'Parry'}</span>
               </button>
 
               <button

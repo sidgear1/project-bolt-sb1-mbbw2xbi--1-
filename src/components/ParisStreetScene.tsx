@@ -183,8 +183,7 @@ export default function ParisStreetScene({
     <div className="fixed inset-0 bg-[#0d0804] flex items-center justify-center overflow-hidden">
       <div
         ref={containerRef}
-        className="relative"
-        style={{ height: '100vh', aspectRatio: '1 / 1', maxWidth: '100vw', maxHeight: '100vh' }}
+        className="relative h-full w-full"
         onMouseMove={handleSceneMouseMove}
       >
         {/* Scene image */}

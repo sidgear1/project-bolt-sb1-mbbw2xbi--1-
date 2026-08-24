@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback } from 'react';
 
 export interface DebugPoint { x: number; y: number; }
 
@@ -13,23 +13,12 @@ export interface DebugOverlay {
 }
 
 export function useDebugOverlay(): DebugOverlay {
-  const [debugMode, setDebugMode] = useState(false);
+  // Keyboard activation is handled once by GlobalDebugOverlay, mounted at the
+  // app root, so scene-local overlays remain inactive.
+  const debugMode = false;
   const [debugPoints, setDebugPoints] = useState<DebugPoint[]>([]);
   const [mousePos, setMousePos] = useState<DebugPoint | null>(null);
   const sceneRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== '#') return;
-      const active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
-      setDebugMode(d => !d);
-      setDebugPoints([]);
-      setMousePos(null);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
 
   const pctFromEvent = useCallback((e: React.MouseEvent): DebugPoint | null => {
     if (!sceneRef.current) return null;

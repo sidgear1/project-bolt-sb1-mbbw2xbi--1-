@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 
 export type VoiceGender = 'male' | 'female' | 'character' | 'bella' | 'josh' | 'shopkeeper' | 'busWoman' | 'wife' | 'adventure';
 type SpeechLanguage = 'en' | 'zh';
@@ -12,6 +12,10 @@ function pickVoice(gender: VoiceGender, language: SpeechLanguage): SpeechSynthes
   const voices = speechSynthesis.getVoices();
   if (!voices.length) return null;
 
+  const preferredEnglishVoice = (candidates: SpeechSynthesisVoice[], preferredNames: string[]) =>
+    candidates.find((voice) => preferredNames.some((name) => voice.name.toLowerCase().includes(name)))
+    ?? candidates.find((voice) => /\b(online|natural|neural|enhanced)\b/i.test(voice.name));
+
   if (language === 'zh') {
     const chineseVoices = voices.filter((v) => v.lang.toLowerCase().startsWith('zh'));
     return chineseVoices.find((v) => v.name.toLowerCase().includes(gender === 'female' ? 'female' : 'male'))
@@ -21,7 +25,10 @@ function pickVoice(gender: VoiceGender, language: SpeechLanguage): SpeechSynthes
 
   if (gender === 'female') {
     const enVoices = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
-    return enVoices.find((v) => v.name.toLowerCase().includes('female')) ?? enVoices[0] ?? voices[0] ?? null;
+    return preferredEnglishVoice(enVoices, ['aria', 'ava', 'emma', 'jenny', 'libby', 'sonia', 'hazel', 'zira'])
+      ?? enVoices[0]
+      ?? voices[0]
+      ?? null;
   }
 
   if (gender === 'character') {
@@ -30,14 +37,10 @@ function pickVoice(gender: VoiceGender, language: SpeechLanguage): SpeechSynthes
   }
 
   // Male — narrator, English voice
-  const gbVoices = voices.filter((v) => v.lang === 'en-GB');
-  const gbMale = gbVoices.find((v) => v.name.toLowerCase().includes('male'));
-  if (gbMale) return gbMale;
-  if (gbVoices.length > 0) return gbVoices[0];
-  const enVoices = voices.filter((v) => v.lang.startsWith('en'));
-  const enMale = enVoices.find((v) => v.name.toLowerCase().includes('male'));
-  if (enMale) return enMale;
-  return enVoices[0] ?? voices[0] ?? null;
+  const enVoices = voices.filter((v) => v.lang.toLowerCase().startsWith('en'));
+  return preferredEnglishVoice(enVoices, [
+    'guy', 'brian', 'ryan', 'davis', 'andrew', 'george', 'oliver', 'james', 'david', 'mark',
+  ]) ?? enVoices[0] ?? voices[0] ?? null;
 }
 
 const ELEVENLABS_VOICES = {
@@ -53,7 +56,8 @@ const ELEVENLABS_VOICES = {
 
 function voiceFileId(text: string, voice: VoiceGender, language: SpeechLanguage): string {
   let hash = 2166136261;
-  for (const char of `${language}:${text}`) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  const fileKey = voice === 'bella' ? `${language}:bella:${text}` : `${language}:${text}`;
+  for (const char of fileKey) { hash ^= char.charCodeAt(0); hash = Math.imul(hash, 16777619); }
   return `line-${language}-${(hash >>> 0).toString(36)}`;
 }
 
@@ -81,22 +85,24 @@ export function useSpeech() {
   const requestRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Resume speech synthesis if it pauses when tab is backgrounded
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && speechSynthesis.paused) {
-        speechSynthesis.resume();
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, []);
-
   const cancel = useCallback(() => {
     cancelledRef.current = true;
     requestRef.current?.abort();
     requestRef.current = null;
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    speechSynthesis.cancel();
+  }, []);
+
+  // Every adventure owns its narration. When the player leaves that scene,
+  // stop its ElevenLabs file and any native fallback immediately.
+  useEffect(() => () => {
+    cancelledRef.current = true;
+    requestRef.current?.abort();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
     speechSynthesis.cancel();
   }, []);
 
@@ -131,15 +137,29 @@ export function useSpeech() {
 
     const voice = pickVoice(nativeGender, language);
     if (voice) utterance.voice = voice;
-    utterance.onend = () => onEnd?.();
-    utterance.onerror = () => onEnd?.();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      onEnd?.();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
 
     const file = `${import.meta.env.BASE_URL}audio/voices/${voiceFileId(text, gender, language)}.mp3`;
     const audio = new Audio(file);
     audioRef.current = audio;
-    audio.onended = () => { if (audioRef.current === audio) audioRef.current = null; onEnd?.(); };
-    audio.onerror = () => { if (!cancelledRef.current) speechSynthesis.speak(utterance); };
-    audio.play().catch(() => { if (!cancelledRef.current) speechSynthesis.speak(utterance); });
+    audio.onended = () => { if (audioRef.current === audio) audioRef.current = null; finish(); };
+    // Generated MP3s are preferred, but new Chinese lines do not always have
+    // a matching file yet. Use the device's Chinese voice rather than silence.
+    const useNativeVoice = () => {
+      if (audioRef.current === audio) audioRef.current = null;
+      if (cancelledRef.current) { finish(); return; }
+      speechSynthesis.cancel();
+      speechSynthesis.speak(utterance);
+    };
+    audio.onerror = useNativeVoice;
+    audio.play().catch(useNativeVoice);
   };
 
   const speakSegmented = useCallback(
