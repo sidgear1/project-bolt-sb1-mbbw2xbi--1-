@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ChevronRight, Volume2, TreePine, Armchair, Flower2, X, Zap, Check } from 'lucide-react';
 import { useLanguage } from '../i18n';
 import { assetUrl } from '../utils/assetUrl';
+import SmoothSceneImage from './SmoothSceneImage';
 
 interface FlashbackSceneProps {
   onComplete: () => void;
@@ -369,15 +370,13 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
     return () => window.removeEventListener('keydown', skip);
   }, [step, animating, advance]);
 
-  const isEmily = step?.type === 'dialogue' && step.speaker === 'emily';
   const isChaotic = step?.type === 'dialogue' && step.speaker === 'emily' && (step.text.includes('They are coming') || step.text.includes('They have weapons'));
-  const isPanic = step?.type === 'dialogue' && step.speaker === 'you' && step.text.includes("What's going on");
 
   return (
     <div className="fixed inset-0 z-50">
       <div className={`absolute inset-0 bg-[#0a0604] transition-opacity duration-1000 ${closing ? 'opacity-0' : 'opacity-100'}`}>
         {/* Background garden image */}
-        <img
+        <SmoothSceneImage
           src={assetUrl('Use_AI_Image_Jun_15,_2026,_19_20_35.png')}
           onError={(e) => { (e.target as HTMLImageElement).src = 'https://images.pexels.com/photos/1179229/pexels-photo-1179229.jpeg?auto=compress&cs=tinysrgb&w=1920'; (e.target as HTMLImageElement).onerror = null; }}
           alt="Memory garden"
@@ -439,10 +438,11 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
 
         {/* Item narrative popup */}
         {itemNarrative && (
-          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 w-full max-w-2xl px-4">
-            <div className="bg-[#0a0604]/92 border border-[#8b6914]/30 rounded-2xl px-5 py-4 shadow-2xl backdrop-blur-sm">
-              <p className="text-[#f0e8d8] text-sm leading-relaxed">{itemNarrative}</p>
-              <p className="text-[#b09060] text-xs mt-2 text-right">click to dismiss</p>
+          <div className="story-dialogue-panel absolute z-30 cursor-pointer" onClick={() => setItemNarrative(null)}>
+            <div className="story-dialogue-content">
+              <div className="scene-eyebrow">Narrator</div>
+              <p className="story-dialogue-text">{itemNarrative}</p>
+              <div className="cop-narration-footer"><span>click anywhere to continue</span><button onClick={(event) => { event.stopPropagation(); speak(itemNarrative, 'male'); }}><Volume2 size={12} /> Listen</button></div>
             </div>
           </div>
         )}
@@ -452,29 +452,17 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
           <div className="w-full max-w-2xl mx-auto pointer-events-auto">
             {/* Narrator / Dialogue box */}
             {step?.type === 'dialogue' && (
-              <div className={`transition-all duration-300 ${isChaotic ? 'animate-pulse' : ''} ${shake ? 'translate-x-1' : ''}`}>
-                <div className="bg-[#0a0604]/96 border border-[#8b6914]/30 rounded-2xl px-6 py-5 shadow-2xl backdrop-blur-sm">
+              <div className={`story-dialogue-panel fixed z-10 pointer-events-auto transition-all duration-300 ${isChaotic ? 'animate-pulse' : ''} ${shake ? 'translate-x-1' : ''}`}>
+                <div className="story-dialogue-content">
                   {/* Speaker header */}
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: SPEAKER_COLORS[step.speaker] }} />
-                    <span className="text-xs uppercase tracking-widest font-medium" style={{ color: SPEAKER_COLORS[step.speaker] }}>
+                  <div className="scene-eyebrow">
+                    <div className="cop-narrator-dot" style={{ background: SPEAKER_COLORS[step.speaker] }} />
+                    <span>
                       {isChinese ? ({ narrator: '旁白', you: '他', emily: '艾米丽', wife: '妻子' }[step.speaker]) : SPEAKER_LABELS[step.speaker]}
                     </span>
-                    {/* Speaker button for Emily */}
-                    {isEmily && step.speakText && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); speak(step.speakText!, 'female'); }}
-                        className="text-[#8b6914] hover:text-[#c4942a] transition-colors ml-2"
-                        title="Repeat"
-                      >
-                        <Volume2 size={14} />
-                      </button>
-                    )}
                   </div>
                   {/* Dialogue text */}
-                  <p className={`text-[#f0e8d8] text-base leading-relaxed font-display ${isChaotic ? 'text-[#ef4444]' : ''} ${isPanic ? 'text-[#c4942a]' : ''}`}
-                    style={{ fontStyle: step.speaker === 'narrator' ? 'italic' : 'normal' }}
-                  >
+                  <p className="story-dialogue-text">
                     {step.speaker === 'emily' || step.speaker === 'wife' ? '"' : ''}
                     {animating ? displayedText : displayDialogue}
                     {step.speaker === 'emily' || step.speaker === 'wife' ? '"' : ''}
@@ -482,13 +470,7 @@ export default function FlashbackScene({ onComplete, onAwardXp, speak, cancel, o
                       <span className="inline-block w-0.5 h-4 bg-[#c4942a] ml-0.5 animate-pulse align-middle" />
                     )}
                   </p>
-                  {/* Click to continue */}
-                  {!animating && (
-                    <div className="flex items-center gap-1 text-[#8b6914]/60 text-xs mt-3 cursor-pointer">
-                      {isChinese ? '点击继续' : 'click to continue'}
-                      <ChevronRight size={12} />
-                    </div>
-                  )}
+                  <div className="cop-narration-footer"><span>{animating ? (isChinese ? '点击跳过文字动画' : 'click to skip text animation') : (isChinese ? '点击任意位置继续' : 'click anywhere to continue')}</span><button onClick={(event) => { event.stopPropagation(); speak(step.speakText ?? displayDialogue, step.speakVoice ?? 'male'); }}><Volume2 size={12} /> {isChinese ? '听发音' : 'Listen'}</button></div>
                 </div>
               </div>
             )}

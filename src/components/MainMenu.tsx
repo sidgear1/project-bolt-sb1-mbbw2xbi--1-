@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import {
   BookOpen,
   ChevronLeft,
@@ -19,23 +19,35 @@ import {
   Pause,
   Power,
   Sparkles,
+  Leaf,
+  Lightbulb,
 } from "lucide-react";
 import { useSave } from "../hooks/useSave";
 import { useDebugOverlay } from "../hooks/useDebugOverlay";
-import { useSpeech } from "../hooks/useSpeech";
+import { preloadGeneratedSpeech, useSpeech } from "../hooks/useSpeech";
 import { useLanguage } from "../i18n";
 import DebugOverlayPanel from "./DebugOverlayPanel";
+import RevisionWorldStats from "./RevisionWorldStats";
+import LiveTypingFeedback, { LiveAnswerLetters } from "./LiveTypingFeedback";
+import { isSkipAnswer, levenshtein, stripAccents } from "../utils/levenshtein";
+import { assetUrl } from "../utils/assetUrl";
+import { capitaliseStandalone } from "../utils/textCase";
+import { recordDailyLearnedWords } from "../utils/learningProgress";
+import type { GamePhase } from "../types";
+import SmoothSceneImage from "./SmoothSceneImage";
+import { preloadImage, preloadSceneWindow, scheduleIdleImagePreload } from "../utils/imagePreloader";
+import QuizModeMenu, { type QuizModeValue } from "./QuizModeMenu";
 import BackyardAdventure from "./BackyardAdventure";
 import {
   BusTicketAdventure,
   CopAdventure,
   HomeAdventure,
+  NightMusicAdventure,
+  primeSceneAmbience,
   SportsDayAdventure,
 } from "./ElderwoodAdventures";
 import { MaskedManAdventure } from "./MaskedManAdventure";
-import { isSkipAnswer, levenshtein, stripAccents } from "../utils/levenshtein";
-import { assetUrl } from "../utils/assetUrl";
-import type { GamePhase } from "../types";
+import { MaskedBaronAdventure } from "./MaskedBaronAdventure";
 
 export type HubSection =
   | "home"
@@ -47,16 +59,44 @@ export type HubSection =
   | "bus"
   | "family-home"
   | "cop"
+  | "music"
   | "soccer-match"
   | "masked-man"
+  | "masked-baron"
   | "adventure"
   | "revision"
   | "multiplayer"
   | "settings";
 
+const WORLD_SCENE_ENTRY_IMAGES: Partial<Record<HubSection, string>> = {
+  backyard: assetUrl("a1.png"),
+  shop: assetUrl("scenes/bella/b1-woman-no-boards-v2.png"),
+  market: assetUrl("scenes/shop/c1-v3.png"),
+  bus: assetUrl("scenes/bus/d1.png"),
+  "family-home": assetUrl("scenes/home/return-home-e1.webp"),
+  cop: assetUrl("scenes/cop/i1.png"),
+  "soccer-match": assetUrl("scenes/sports-day/g1.png"),
+  music: assetUrl("scenes/music/1a.png"),
+  "masked-baron": assetUrl("scenes/masked-baron/1a.png"),
+};
+
+const REVISION_ENTRY_IMAGES = [
+  assetUrl("world-ai/revision/revision-dashboard-frame-v7.png"),
+  assetUrl("world-ai/revision/revision-card-adventure-v5.png"),
+  assetUrl("world-ai/revision/revision-card-roam-v5.png"),
+  assetUrl("world-ai/revision/revision-world-town-v1.png"),
+  assetUrl("world-ai/revision/revision-card-locked-v5.png"),
+] as const;
+
+function preloadRevisionEntry(priority: "high" | "low" = "high") {
+  const sources = [...new Set([...REVISION_ENTRY_IMAGES, ...Object.values(REVISION_LOCATION_IMAGES)])];
+  return Promise.all(sources.map(source => preloadImage(source, priority)));
+}
+
 interface MainMenuProps {
   onNewGame: () => void;
   onStartTammy: () => void;
+  onStartAgent: () => void;
   onContinue: () => void;
   onStartAudio: () => void;
   onLogout: () => void;
@@ -81,7 +121,7 @@ const navItems: Array<{
   },
   {
     id: "world",
-    label: "World map",
+    label: "World Map",
     labelZh: "世界地图",
     icon: Globe2,
     note: "Choose a region",
@@ -97,7 +137,7 @@ const navItems: Array<{
   },
   {
     id: "revision",
-    label: "Revision & achievements",
+    label: "Revision & Achievements",
     labelZh: "复习与成就",
     icon: RotateCcw,
     note: "Sharpen your words",
@@ -136,12 +176,200 @@ const WORLD_MAP_DAY_IMG = assetUrl(
 const WORLD_MAP_SUNSET_IMG = assetUrl("world-ai/elderwoods-map-sunset-v2.png");
 const WORLD_MAP_NIGHT_IMG = assetUrl("world-ai/elderwoods-map-night-v2.png");
 const TOWN_CENTRE_MAP_IMG = assetUrl("maps/elderwoods-town-centre-map-v2.png");
-const ROAM_VIDEOS = [
-  assetUrl("videos/woodstock-roam.mp4"),
-  "https://res.cloudinary.com/tjjlhlpp/video/upload/Video_Project_13_1.mp4",
+type RoamDestination = "woodstock" | "california";
+
+type SceneSummaryWordDefinition = { korean: string; english: string; historyWord?: string };
+type SceneSummaryDefinition = { title: string; storageScene: string; scored?: boolean; words: SceneSummaryWordDefinition[] };
+type EndSceneSummary = {
+  title: string;
+  unlocked: number;
+  total: number;
+  words: Array<SceneSummaryWordDefinition & { seenBefore: number; difficulty: "Easy" | "Medium" | "Hard"; correct: number; unlocked: boolean }>;
+};
+type QuizSummaryMode = "easy" | "normal" | "hard" | "very-hard";
+type EndQuizSummary = {
+  title: string;
+  grade: number;
+  correct: number;
+  total: number;
+  passed: boolean;
+  words: Array<{ korean: string; english: string; correct: boolean; correctTimes: number; mode: QuizSummaryMode; answerScript?: "Hangul" | "Romanisation" }>;
+};
+
+function historicalBestQuizScore(id: "bus" | "music", slot: number) {
+  const expected = id === "bus"
+    ? ["아이스크림", "가게", "닭고기", "감자", "물", "커피"]
+    : ["bed", "drink coffee", "start", "run", "jump", "climb", "shop", "water"];
+  let attempts: Array<{ word: string; correct: boolean }> = [];
+  try {
+    const stored = JSON.parse(localStorage.getItem(`taletalk-slot-${slot}-world-quiz-attempts-v1`) ?? "[]") as unknown;
+    if (Array.isArray(stored)) attempts = stored.filter((entry): entry is { word: string; correct: boolean } => typeof entry === "object" && entry !== null && typeof (entry as { word?: unknown }).word === "string" && typeof (entry as { correct?: unknown }).correct === "boolean");
+  } catch { attempts = []; }
+  let expectedIndex = 0;
+  let correct = 0;
+  let best = -1;
+  for (const attempt of attempts) {
+    const word = attempt.word.trim().toLowerCase();
+    if (word === expected[expectedIndex]) {
+      if (attempt.correct) correct += 1;
+      expectedIndex += 1;
+      if (expectedIndex === expected.length) {
+        best = Math.max(best, Math.round(correct / expected.length * 100));
+        expectedIndex = 0;
+        correct = 0;
+      }
+    } else if (word === expected[0]) {
+      expectedIndex = 1;
+      correct = attempt.correct ? 1 : 0;
+    } else {
+      expectedIndex = 0;
+      correct = 0;
+    }
+  }
+  return best;
+}
+
+function readBestQuizScore(id: "bus" | "music", slot: number) {
+  const values: number[] = [];
+  const storedScoreValue = localStorage.getItem(`taletalk-slot-${slot}-${id}-score`);
+  const storedScore = storedScoreValue === null ? Number.NaN : Number(storedScoreValue);
+  if (Number.isFinite(storedScore)) values.push(storedScore);
+  for (const kind of ["best", "latest"] as const) {
+    try {
+      const summary = JSON.parse(localStorage.getItem(`taletalk-slot-${slot}-quiz-${id}-${kind}-summary-v1`) ?? "null") as { grade?: unknown } | null;
+      if (summary && typeof summary.grade === "number") values.push(summary.grade);
+    } catch { /* Ignore an invalid older summary. */ }
+  }
+  const historical = historicalBestQuizScore(id, slot);
+  if (historical >= 0) values.push(historical);
+  return values.length ? Math.max(...values) : null;
+}
+
+function readEndQuizSummary(id: "bus" | "music", slot: number): EndQuizSummary | null {
+  try {
+    const summary = JSON.parse(localStorage.getItem(`taletalk-slot-${slot}-quiz-${id}-best-summary-v1`) ?? localStorage.getItem(`taletalk-slot-${slot}-quiz-${id}-latest-summary-v1`) ?? "null") as EndQuizSummary | null;
+    if (summary) {
+      const allStats = JSON.parse(localStorage.getItem(`taletalk-slot-${slot}-quiz-word-stats-v1`) ?? "{}") as Record<string, Record<string, { lastCorrectScript?: "Hangul" | "Romanisation" }>>;
+      const quizStats = allStats[id] ?? {};
+      summary.words = summary.words.map(word => ({
+        ...word,
+        answerScript: quizStats[word.korean.toLowerCase().replace(/\s/g, "")]?.lastCorrectScript ?? word.answerScript,
+      }));
+    }
+    const bestGrade = readBestQuizScore(id, slot);
+    return summary && bestGrade !== null && bestGrade > summary.grade
+      ? { ...summary, grade: bestGrade, correct: Math.round(bestGrade / 100 * summary.total), passed: bestGrade >= 50 }
+      : summary;
+  } catch {
+    return null;
+  }
+}
+
+const SCENE_SUMMARY_DEFINITIONS: Record<string, SceneSummaryDefinition> = {
+  backyard: { title: "Scene One", storageScene: "backyard", words: [{ korean: "저는", english: "I (topic form)" }, { korean: "슬퍼요", english: "Unhappy / sad" }, { korean: "아이스크림", english: "Ice cream" }, { korean: "네", english: "Yes / OK" }] },
+  icecream: { title: "Ice Cream Shop", storageScene: "icecream", words: [{ korean: "아이스크림 주세요", english: "Ice cream, please" }, { korean: "주세요", english: "Please give me", historyWord: "please" }, { korean: "감사합니다", english: "Thank you" }, { korean: "천만에요", english: "You are welcome" }] },
+  shopping: { title: "Shopping Centre", storageScene: "shopping", words: [{ korean: "가게", english: "Shop" }, { korean: "저녁", english: "Dinner" }, { korean: "음료", english: "Drinks" }, { korean: "과일", english: "Fruit" }, { korean: "닭고기", english: "Chicken" }, { korean: "물", english: "Water" }, { korean: "사과", english: "Apples", historyWord: "Apple" }, { korean: "계산하다", english: "Pay" }] },
+  bus: { title: "Bus Stop Quiz", storageScene: "bus", scored: true, words: [{ korean: "아이스크림", english: "Ice cream" }, { korean: "주세요", english: "Please" }, { korean: "감사합니다", english: "Thank you" }, { korean: "천만에요", english: "You are welcome" }, { korean: "가게", english: "Shop" }, { korean: "닭고기", english: "Chicken" }, { korean: "물", english: "Water" }, { korean: "사과", english: "Apples" }] },
+  home: { title: "Returning Home", storageScene: "home", words: [{ korean: "꽃", english: "Flower" }, { korean: "미안해", english: "Sorry" }] },
+  cop: { title: "Detective Mason", storageScene: "cop", words: [{ korean: "커피를 마시다", english: "Drink coffee" }, { korean: "침대", english: "Bed" }, { korean: "문", english: "Door" }, { korean: "개", english: "Dog" }, { korean: "신문", english: "Newspaper" }] },
+  sports: { title: "Sports Day", storageScene: "sports", words: [{ korean: "시작하다", english: "Start" }, { korean: "달리다", english: "Run" }, { korean: "뛰다", english: "Jump" }, { korean: "오르다", english: "Climb" }, { korean: "걷다", english: "Walk" }, { korean: "줍다", english: "Pick up", historyWord: "Pickup" }, { korean: "나르다", english: "Carry" }, { korean: "내려놓다", english: "Put down", historyWord: "Putdown" }, { korean: "끝내다", english: "Finish" }] },
+  music: { title: "Night Music", storageScene: "music", scored: true, words: [{ korean: "침대", english: "Bed", historyWord: "bed" }, { korean: "커피를 마시다", english: "Drink coffee", historyWord: "drink coffee" }, { korean: "시작하다", english: "Start", historyWord: "start" }, { korean: "달리다", english: "Run", historyWord: "run" }, { korean: "뛰다", english: "Jump", historyWord: "jump" }, { korean: "오르다", english: "Climb", historyWord: "climb" }, { korean: "가게", english: "Shop", historyWord: "shop" }, { korean: "물", english: "Water", historyWord: "water" }, { korean: "끝내다", english: "Finish", historyWord: "finish" }] },
+  "masked-baron": { title: "The Masked Baron", storageScene: "masked-baron", words: [{ korean: "앉다", english: "Sitting" }, { korean: "따라가다", english: "Follow" }] },
+};
+
+const COLLECTION_EXTRA_WORDS: SceneSummaryWordDefinition[] = [
+  { korean: "안녕하세요", english: "Hello" },
+  { korean: "친구", english: "Friend" },
+  { korean: "좋은 아침", english: "Good morning" },
+  { korean: "일어서다", english: "Stand up" },
+  { korean: "저녁", english: "Dinner" },
+  { korean: "음료", english: "Drinks" },
+  { korean: "과일", english: "Fruit" },
+  { korean: "감자", english: "Potatoes" },
+  { korean: "사과", english: "Apples", historyWord: "Apples" },
+  { korean: "바나나", english: "Banana" },
+  { korean: "걷다", english: "Walk" },
+  { korean: "줍다", english: "Pick up", historyWord: "Pickup" },
+  { korean: "내려놓다", english: "Put down", historyWord: "Putdown" },
+  { korean: "끝내다", english: "Finish" },
+  { korean: "계산하다", english: "Pay" },
+  { korean: "다리", english: "Bridge" },
+  { korean: "나무", english: "Trees" },
+  { korean: "강", english: "River" },
 ];
 
+const COLLECTION_WORD_BANK = [
+  ...Object.values(SCENE_SUMMARY_DEFINITIONS).flatMap(scene => scene.words),
+  ...COLLECTION_EXTRA_WORDS,
+];
+
+const summaryDifficulty = (word: string): "Easy" | "Medium" | "Hard" => {
+  const length = [...word.replace(/\s/g, "")].length;
+  return length <= 2 ? "Easy" : length <= 4 ? "Medium" : "Hard";
+};
+
+function buildEndSceneSummary(id: string, slot: number): EndSceneSummary | null {
+  const definition = SCENE_SUMMARY_DEFINITIONS[id];
+  if (!definition) return null;
+  const normaliseWord = (value: string) => value.toLowerCase().replace(/[\s\-']/g, "");
+  const statsKey = `taletalk-slot-${slot}-word-summary-stats-v1`;
+  let stats: Record<string, { seen: number; correct: number }> = {};
+  try { stats = JSON.parse(localStorage.getItem(statsKey) ?? "{}"); } catch { stats = {}; }
+  const attempts = readStoredArray(localStorage.getItem(`taletalk-slot-${slot}-world-quiz-attempts-v1`)).filter((entry): entry is { word: string; correct: boolean } => typeof entry === "object" && entry !== null && typeof (entry as { word?: unknown }).word === "string" && typeof (entry as { correct?: unknown }).correct === "boolean");
+  let revision: Record<string, { attempts?: number; correct?: number }> = {};
+  try { revision = JSON.parse(localStorage.getItem(`taletalk-slot-${slot}-revision-history-v1`) ?? "{}"); } catch { revision = {}; }
+  const sceneKey = `taletalk-slot-${slot}-scene-${definition.storageScene}-words`;
+  const sceneWords = new Set(readStoredArray(localStorage.getItem(sceneKey)).filter((word): word is string => typeof word === "string").map(normaliseWord));
+  const globalKey = `taletalk-slot-${slot}-unlocked-words`;
+  const globalWords = new Set(readStoredArray(localStorage.getItem(globalKey)).filter((word): word is string => typeof word === "string").map(normaliseWord));
+
+  // Finishing a story scene confirms its taught words. Scored quizzes retain
+  // their real correct/incorrect result and do not award missed words.
+  if (!definition.scored) definition.words.forEach(word => { sceneWords.add(normaliseWord(word.korean)); globalWords.add(normaliseWord(word.korean)); });
+
+  const words = definition.words.map(word => {
+    const key = normaliseWord(word.korean);
+    const prior = stats[key] ?? { seen: 0, correct: 0 };
+    const aliases = [word.korean, word.english, word.historyWord ?? ""].map(normaliseWord);
+    const matchingAttempts = attempts.filter(attempt => aliases.includes(normaliseWord(attempt.word)));
+    const revisionEntry = revision[key];
+    const seenFromHistory = matchingAttempts.length + (revisionEntry?.attempts ?? 0);
+    const correctFromHistory = matchingAttempts.filter(attempt => attempt.correct).length + (revisionEntry?.correct ?? 0);
+    const seenBefore = Math.max(prior.seen, Math.max(0, seenFromHistory - 1));
+    const correct = definition.scored ? Math.max(prior.correct, correctFromHistory) : prior.correct + 1;
+    stats[key] = { seen: Math.max(prior.seen + 1, seenFromHistory), correct };
+    return { ...word, seenBefore, difficulty: summaryDifficulty(word.korean), correct, unlocked: sceneWords.has(key) || globalWords.has(key) };
+  });
+  localStorage.setItem(statsKey, JSON.stringify(stats));
+  localStorage.setItem(sceneKey, JSON.stringify([...sceneWords].sort()));
+  localStorage.setItem(globalKey, JSON.stringify([...globalWords].sort()));
+  recordDailyLearnedWords(words.filter(word => word.unlocked).map(word => word.korean), slot);
+  window.dispatchEvent(new Event("taletalk-words-changed"));
+  return { title: definition.title, unlocked: words.filter(word => word.unlocked).length, total: words.length, words };
+}
+
+const ROAM_DESTINATIONS: Record<RoamDestination, {
+  videos: string[];
+  usesWoodstockAudio: boolean;
+}> = {
+  woodstock: {
+    videos: [
+      assetUrl("videos/woodstock-roam-web.mp4"),
+      "https://res.cloudinary.com/tjjlhlpp/video/upload/Video_Project_13_1.mp4",
+    ],
+    usesWoodstockAudio: true,
+  },
+  california: {
+    videos: [
+      "https://res.cloudinary.com/tjjlhlpp/video/upload/v1788083949/Cali_Hosue_1_comp.mp4",
+      "https://res.cloudinary.com/tjjlhlpp/video/upload/v1788083966/cali_house_2.mp4",
+    ],
+    usesWoodstockAudio: false,
+  },
+};
+
 function useMenuMusic(section: HubSection, muted: boolean) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     const source =
       section === "home"
@@ -151,19 +379,26 @@ function useMenuMusic(section: HubSection, muted: boolean) {
           : null;
     if (!source) return;
     const audio = new Audio(source);
+    audio.preload = "auto";
     audio.loop = true;
     audio.volume = muted ? 0 : 0.32;
+    audioRef.current = audio;
     const play = () => {
-      audio.play().catch(() => {
+      if (audio.paused) audio.play().catch(() => {
         /* Browsers wait for the player's first interaction. */
       });
     };
     play();
-    window.addEventListener("pointerdown", play, { once: true });
+    // Some browsers reject playback during the profile-to-menu transition.
+    // Retry on each real player action until the browser accepts it.
+    window.addEventListener("pointerdown", play, true);
+    window.addEventListener("keydown", play, true);
     return () => {
-      window.removeEventListener("pointerdown", play);
+      window.removeEventListener("pointerdown", play, true);
+      window.removeEventListener("keydown", play, true);
       audio.pause();
       audio.currentTime = 0;
+      if (audioRef.current === audio) audioRef.current = null;
     };
   }, [section, muted]);
 }
@@ -181,110 +416,12 @@ function formatProfilePlayTime(seconds: number) {
   return `${hours}:${minutes}:${remainingSeconds}`;
 }
 
-// Images used after leaving the menu. Fetch them while the player is choosing
-// where to go, so scene changes never reveal an empty background while loading.
-const WORLD_PRELOAD_IMAGES = [
-  WORLD_MAP_IMG,
-  WORLD_MAP_DAY_IMG,
-  WORLD_MAP_SUNSET_IMG,
-  WORLD_MAP_NIGHT_IMG,
-  TOWN_CENTRE_MAP_IMG,
-  assetUrl("maps/north-america-roam-map-v2.png"),
-  assetUrl("cafe_room.png"),
-  assetUrl("Use_AI_Image_Jun_15,_2026,_19_20_35.png"),
-  assetUrl("Gemini_Generated_Image_a625ema625ema625.png"),
-  assetUrl("ChatGPT_Image_Jun_14,_2026,_05_36_59_PM.png"),
-  assetUrl("man_in_g.png"),
-  assetUrl("man_in_g_on_floor.png"),
-  assetUrl("a1.png"),
-  assetUrl("a2.png"),
-  assetUrl("a3.png"),
-  assetUrl("a4.png"),
-  assetUrl("scenes/bella/a5.png"),
-  assetUrl("scenes/bella/a6.png"),
-  assetUrl("scenes/bella/b1-woman.png"),
-  assetUrl("scenes/bella/b2.png"),
-  assetUrl("scenes/bella/b3-no-cyclists.png"),
-  assetUrl("scenes/bella/b4-no-cyclists.png"),
-  assetUrl("scenes/bella/b5-no-cyclists.png"),
-  assetUrl("scenes/bella/b6 copy.png"),
-  assetUrl("scenes/shop/c1.png"),
-  assetUrl("scenes/shop/c2.png"),
-  assetUrl("scenes/shop/c3.png"),
-  assetUrl("scenes/shop/c4.png"),
-  assetUrl("scenes/shop/c5.png"),
-  assetUrl("scenes/shop/c1-v3.png"),
-  assetUrl("scenes/shop/c2-v2.png"),
-  assetUrl("scenes/shop/c7.png"),
-  assetUrl("scenes/shop/c8.png"),
-  assetUrl("scenes/bus/d1.png"),
-  assetUrl("scenes/bus/d2.png"),
-  assetUrl("scenes/bus/d3.png"),
-  assetUrl("scenes/bus/d4.png"),
-  assetUrl("scenes/home/e1-enhanced.png"),
-  assetUrl("scenes/home/e2-enhanced.png"),
-  assetUrl("scenes/home/e3-enhanced.png"),
-  assetUrl("scenes/home/e4-enhanced.png"),
-  assetUrl("scenes/home/e5-enhanced.png"),
-  assetUrl("scenes/garden/f1.png"),
-  assetUrl("scenes/garden/f2.png"),
-  assetUrl("scenes/garden/f3.png"),
-  assetUrl("scenes/garden/f4.png"),
-];
-
-function preloadImage(source: string): Promise<void> {
-  return new Promise((resolve) => {
-    const image = new Image();
-    const timeout = window.setTimeout(resolve, 6000);
-    const finish = () => {
-      window.clearTimeout(timeout);
-      resolve();
-    };
-    image.onload = async () => {
-      try {
-        await image.decode();
-      } catch {
-        /* The image can still be painted. */
-      }
-      finish();
-    };
-    // A missing optional asset must not leave the app on its loading screen.
-    image.onerror = finish;
-    image.src = source;
-  });
-}
-
 // Keep the previous scene visible while the next image decodes. This prevents
 // the black/blank flash that occurs when a large scene image is swapped.
 function SceneBackground({ source, alt }: { source: string; alt: string }) {
-  const [visibleSource, setVisibleSource] = useState(source);
-  const [, setLoading] = useState(false);
-  useEffect(() => {
-    if (source === visibleSource) return;
-    let active = true;
-    setLoading(true);
-    const image = new Image();
-    const reveal = async () => {
-      try {
-        await image.decode();
-      } catch {
-        /* paintable even if decode is unavailable */
-      }
-      if (active) {
-        setVisibleSource(source);
-        setLoading(false);
-      }
-    };
-    image.onload = reveal;
-    image.onerror = reveal;
-    image.src = source;
-    return () => {
-      active = false;
-    };
-  }, [source, visibleSource]);
   return (
-    <img
-      src={visibleSource}
+    <SmoothSceneImage
+      src={source}
       alt={alt}
       className="absolute inset-0 h-full w-full object-cover"
       draggable={false}
@@ -292,18 +429,58 @@ function SceneBackground({ source, alt }: { source: string; alt: string }) {
   );
 }
 
-const revisionWords = [
-  { italian: "ice cream", english: "冰淇淋" },
-  { italian: "hello", english: "你好" },
-  { italian: "thank you", english: "谢谢" },
-  { italian: "window", english: "窗户" },
-  { italian: "key", english: "钥匙" },
-  { italian: "coffee", english: "咖啡" },
+const revisionWordBank = [
+  { italian: "아이스크림", english: "ice cream", aliases: ["ice cream"] }, { italian: "안녕하세요", english: "hello", aliases: ["hello"] },
+  { italian: "감사합니다", english: "thank you", aliases: ["thank you"] }, { italian: "창문", english: "window", aliases: ["window"] },
+  { italian: "열쇠", english: "key", aliases: ["key"] }, { italian: "커피", english: "coffee", aliases: ["coffee"] },
+  { italian: "다리", english: "bridge", aliases: ["bridge"] }, { italian: "나무", english: "trees", aliases: ["trees"] },
+  { italian: "강", english: "river", aliases: ["river"] }, { italian: "친구", english: "friend", aliases: ["friend"] },
+  { italian: "좋은 아침", english: "good morning", aliases: ["good morning"] }, { italian: "물", english: "water", aliases: ["water"] },
+  { italian: "가게", english: "shop", aliases: ["shop"] }, { italian: "닭고기", english: "chicken", aliases: ["chicken"] },
+  { italian: "감자", english: "potatoes", aliases: ["potatoes"] }, { italian: "침대", english: "bed", aliases: ["bed"] },
+  { italian: "나르다", english: "carry", aliases: ["carry"] }, { italian: "달리다", english: "run", aliases: ["run"] },
+  { italian: "뛰다", english: "jump", aliases: ["jump"] },
 ];
+
+const sceneOneRevisionWords = [
+  { italian: "\uC800\uB294", english: "I am", aliases: ["i am"] },
+  { italian: "\uC2AC\uD37C\uC694", english: "unhappy", aliases: ["unhappy"] },
+];
+
+type RevisionCategory = "adventure" | "roam" | "world" | "new";
+type RevisionWord = { italian: string; english: string; aliases?: string[] };
+type QuizAttempt = { correct: boolean; at: number };
+type QuizHistory = Record<string, { attempts: number; correct: number; recent?: QuizAttempt[] }>;
+
+const REVISION_LOCATION_IMAGES: Record<string, string> = {
+  "저는": assetUrl("scenes/bella/a5.png"), "슬퍼요": assetUrl("scenes/bella/a5.png"),
+  "아이스크림": assetUrl("scenes/bella/a6.png"), "네": assetUrl("scenes/bella/a6.png"),
+  "아이스크림 주세요": assetUrl("scenes/bella/b2-no-boards-v2.png"), "주세요": assetUrl("scenes/bella/b2-no-boards-v2.png"),
+  "감사합니다": assetUrl("scenes/bella/b3-no-boards-v2.png"), "천만에요": assetUrl("scenes/bella/b3-no-boards-v2.png"),
+  "가게": assetUrl("scenes/shop/c1-v3.png"), "저녁": assetUrl("scenes/shop/c3-dinner.png"),
+  "음료": assetUrl("scenes/shop/c4-v2.png"), "과일": assetUrl("scenes/shop/c5-v2.png"),
+  "닭고기": assetUrl("scenes/shop/c3-dinner.png"), "물": assetUrl("scenes/shop/c4-v2.png"),
+  "사과": assetUrl("scenes/shop/c5-v2.png"), "계산하다": assetUrl("scenes/shop/c9-taking-rose.png"),
+  "꽃": assetUrl("scenes/home/return-home-e4.webp"), "미안해": assetUrl("scenes/home/return-home-f3.webp"),
+  "커피를 마시다": assetUrl("scenes/cop/i3.png"), "침대": assetUrl("scenes/cop/i3.png"),
+  "문": assetUrl("scenes/cop/i4.png"), "개": assetUrl("scenes/cop/i8.webp"), "신문": assetUrl("scenes/cop/i8.webp"),
+  "시작하다": assetUrl("scenes/sports-day/g3.png"), "달리다": assetUrl("scenes/sports-day/g3.png"),
+  "뛰다": assetUrl("scenes/sports-day/g4.png"), "오르다": assetUrl("scenes/sports-day/g6.png"),
+  "걷다": assetUrl("scenes/sports-day/g8.png"), "줍다": assetUrl("scenes/sports-day/g10.png"),
+  "나르다": assetUrl("scenes/sports-day/g10-picked-up-v2.png"), "내려놓다": assetUrl("scenes/sports-day/g11.png"),
+  "끝내다": assetUrl("scenes/sports-day/g13.png"),
+  "앉다": assetUrl("scenes/masked-baron/1.png"), "따라가다": assetUrl("scenes/masked-baron/6.png"),
+  "다리": assetUrl("roam/woodstock-vermont-aerial.png"), "나무": assetUrl("roam/woodstock-vermont-aerial.png"), "강": assetUrl("roam/woodstock-vermont-aerial.png"),
+};
+
+function readStoredArray(value: string | null): unknown[] {
+  try { return JSON.parse(value ?? "[]") as unknown[]; } catch { return []; }
+}
 
 export default function MainMenu({
   onNewGame,
   onStartTammy,
+  onStartAgent,
   onContinue,
   onStartAudio,
   onLogout,
@@ -319,17 +496,53 @@ export default function MainMenu({
   const [homeBackground] = useState(
     () => HOME_BACKGROUNDS[Math.floor(Math.random() * HOME_BACKGROUNDS.length)],
   );
+  const wallpaperPreloadRef = useRef<HTMLImageElement[]>([]);
   // Home wallpapers are decoded by the app-wide startup preloader, so the
   // menu can appear immediately without showing a second loading screen.
   const [isMenuReady, setIsMenuReady] = useState(true);
-  const [worldAssetsReady, setWorldAssetsReady] = useState(false);
-  const [isWorldLoading, setIsWorldLoading] = useState(false);
   const { hasSave, selectSlot, getActiveSlot, listSlots } = useSave();
   const [saveExists, setSaveExists] = useState(false);
   const [activeSaveSlot, setActiveSaveSlot] = useState(() => getActiveSlot());
-  const [worldReady, setWorldReady] = useState(false);
   const [section, setSection] = useState<HubSection>(initialSection);
-  const [soundMuted, setSoundMuted] = useState(false);
+  const [endSceneSummary, setEndSceneSummary] = useState<EndSceneSummary | null>(null);
+  const [endQuizSummary, setEndQuizSummary] = useState<EndQuizSummary | null>(null);
+  const sceneEntryRequestRef = useRef(0);
+  useEffect(() => {
+    localStorage.setItem('taletalk-preview-section', section);
+  }, [section]);
+  const [soundMuted, setSoundMuted] = useState(() => localStorage.getItem("taletalk-sound-muted") === "true");
+  const applySoundMuted = (muted: boolean) => {
+    setSoundMuted(muted);
+    localStorage.setItem("taletalk-sound-muted", String(muted));
+    document.querySelectorAll<HTMLMediaElement>("audio,video").forEach(media => { media.muted = muted; });
+    window.dispatchEvent(new CustomEvent("taletalk-sound-change", { detail: muted }));
+  };
+  const openSceneWithSound = (nextSection: HubSection) => {
+    // Every scene opens audibly by default. The player can still mute it from
+    // the scene controls after entering.
+    applySoundMuted(false);
+    const request = ++sceneEntryRequestRef.current;
+    const firstFrame = WORLD_SCENE_ENTRY_IMAGES[nextSection];
+    if (!firstFrame) {
+      setSection(nextSection);
+      return;
+    }
+    // Keep the fully painted map mounted until the destination's first frame
+    // has downloaded and decoded. This protects every entry path, including
+    // keyboard shortcuts and chapter-list buttons.
+    void preloadImage(firstFrame, "high").then(() => {
+      if (request !== sceneEntryRequestRef.current) return;
+      window.requestAnimationFrame(() => setSection(nextSection));
+    });
+  };
+  useEffect(() => {
+    const storyScenes: HubSection[] = ["backyard", "shop", "market", "bus", "family-home", "cop", "music", "soccer-match", "masked-man", "masked-baron", "roam"];
+    if (!storyScenes.includes(section)) return;
+    setSoundMuted(false);
+    localStorage.setItem("taletalk-sound-muted", "false");
+    document.querySelectorAll<HTMLMediaElement>("audio,video").forEach(media => { media.muted = false; });
+    window.dispatchEvent(new CustomEvent("taletalk-sound-change", { detail: false }));
+  }, [section]);
   const soundActionLabel = isChinese
     ? soundMuted ? "声音开" : "声音关"
     : soundMuted ? "Sound on" : "Sound off";
@@ -340,12 +553,31 @@ export default function MainMenu({
     () => localStorage.getItem(`taletalk-slot-${getActiveSlot()}-welcome-pending`) === "true",
   );
   useMenuMusic(section, soundMuted);
+  const [revisionCategory, setRevisionCategory] = useState<RevisionCategory>("adventure");
+  const [revisionWorldChapterOpen, setRevisionWorldChapterOpen] = useState(false);
+  const [revisionPracticeOpen, setRevisionPracticeOpen] = useState(false);
+  const [revisionScenePickerOpen, setRevisionScenePickerOpen] = useState(false);
+  const [revisionProgressOpen, setRevisionProgressOpen] = useState(false);
+  const [revisionProgressScene, setRevisionProgressScene] = useState<string | null>(null);
+  const [revisionWorldStatsOpen, setRevisionWorldStatsOpen] = useState(false);
+  const [revisionSceneName, setRevisionSceneName] = useState("");
+  const [revisionSceneImage, setRevisionSceneImage] = useState("");
+  const [selectedRevisionScenes, setSelectedRevisionScenes] = useState<string[]>([]);
+  const revisionHistoryKey = `taletalk-slot-${activeSaveSlot}-revision-history-v1`;
+  const [revisionHistory, setRevisionHistory] = useState<QuizHistory>(
+    () => JSON.parse(localStorage.getItem(`taletalk-slot-${getActiveSlot()}-revision-history-v1`) ?? "{}") as QuizHistory,
+  );
+  const [revisionTheme] = useState(() => Math.floor(Math.random() * 5));
   const [revisionIndex, setRevisionIndex] = useState(0);
   const [revisionInput, setRevisionInput] = useState("");
+  const [revisionHints, setRevisionHints] = useState(0);
   const [revisionResult, setRevisionResult] = useState<
     "correct" | "wrong" | null
   >(null);
+  const { speak: speakRevision } = useSpeech();
+  const revisionSpokenAudioKeyRef = useRef("");
   const [playerScore, setPlayerScore] = useState(0);
+  const [onlineMode, setOnlineMode] = useState<"normal" | "matchmaking" | "placement">("normal");
   const [multiplayerIndex, setMultiplayerIndex] = useState(0);
   const [multiInput, setMultiInput] = useState("");
   const [multiResult, setMultiResult] = useState<"correct" | "wrong" | null>(
@@ -395,6 +627,18 @@ export default function MainMenu({
         `taletalk-slot-${getActiveSlot()}-soccer-complete`,
       ) === "true",
   );
+  const [, refreshLearningProgress] = useState(0);
+  useEffect(() => {
+    const refresh = () => refreshLearningProgress(revision => revision + 1);
+    window.addEventListener("taletalk-progress-changed", refresh);
+    window.addEventListener("taletalk-words-changed", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener("taletalk-progress-changed", refresh);
+      window.removeEventListener("taletalk-words-changed", refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
   // Main-menu reset shortcut: remove every profile and all progress keys. It is
   // deliberately unavailable while an adventure or map scene is open.
   useEffect(() => {
@@ -426,15 +670,37 @@ export default function MainMenu({
   const streak = Number(localStorage.getItem(progressKey("daily-word-streak")) ?? 0);
   const marketCompleted =
     localStorage.getItem(progressKey("market-complete")) === "true";
-  const worldMapComplete = [
-    bellaMemoryComplete,
-    shopMemoryComplete,
-    marketCompleted,
-    busComplete,
-    homeComplete,
-    copComplete,
-    soccerComplete,
-  ].filter(Boolean).length;
+  const completedWorldMapScenes: Record<string, boolean> = {
+    backyard: bellaMemoryComplete,
+    icecream: shopMemoryComplete,
+    shopping: marketCompleted,
+    bus: busComplete,
+    home: homeComplete,
+    cop: copComplete,
+    sports: soccerComplete,
+    music: localStorage.getItem(progressKey("music-complete")) === "true",
+    "masked-baron": localStorage.getItem(progressKey("masked-baron-complete")) === "true",
+  };
+  const worldMapScenesComplete = Object.values(completedWorldMapScenes).filter(Boolean).length;
+  const normaliseProgressWord = (value: string) => value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const worldMapWordTotal = Object.values(SCENE_SUMMARY_DEFINITIONS)
+    .reduce((total, scene) => total + scene.words.length, 0);
+  const worldMapWordsUnlocked = Object.entries(SCENE_SUMMARY_DEFINITIONS)
+    .reduce((total, [sceneId, scene]) => {
+      // Story scenes teach every listed word by completion. Quizzes only count
+      // the answers actually unlocked, so a missed answer never becomes learned.
+      if (!scene.scored && completedWorldMapScenes[sceneId]) return total + scene.words.length;
+      const stored = new Set(
+        readStoredArray(localStorage.getItem(progressKey(`scene-${scene.storageScene}-words`)))
+          .filter((word): word is string => typeof word === "string")
+          .map(normaliseProgressWord),
+      );
+      const unlocked = scene.words.filter(word =>
+        [word.korean, word.english, word.historyWord ?? ""]
+          .some(alias => stored.has(normaliseProgressWord(alias))),
+      ).length;
+      return total + unlocked;
+    }, 0);
   const roamWords = (() => {
     try {
       return JSON.parse(
@@ -459,14 +725,14 @@ export default function MainMenu({
   const adventureComplete = savedAdventurePhase
     ? Math.max(0, adventurePhases.indexOf(savedAdventurePhase) + 1)
     : 0;
-  const totalProgressSteps = 16 + 7 + adventurePhases.length;
+  const totalProgressSteps = ROAM_WORD_TARGET + worldMapWordTotal + adventurePhases.length;
   const completedMilestones =
-    roamWords.length + worldMapComplete + adventureComplete;
+    roamWords.length + worldMapWordsUnlocked + adventureComplete;
   const progressPercent = Math.round(
     (completedMilestones / totalProgressSteps) * 100,
   );
-  const roamPercent = Math.round((roamWords.length / 16) * 100);
-  const worldMapPercent = Math.round((worldMapComplete / 7) * 100);
+  const roamPercent = Math.round((roamWords.length / ROAM_WORD_TARGET) * 100);
+  const worldMapPercent = Math.round((worldMapWordsUnlocked / worldMapWordTotal) * 100);
   const adventurePercent = Math.round(
     (adventureComplete / adventurePhases.length) * 100,
   );
@@ -474,7 +740,6 @@ export default function MainMenu({
   const switchSaveSlot = (slot: number) => {
     selectSlot(slot);
     setActiveSaveSlot(slot);
-    setWorldReady(true);
     setBellaMemoryComplete(
       localStorage.getItem(progressKey("bella-complete", slot)) === "true",
     );
@@ -499,14 +764,17 @@ export default function MainMenu({
   // A tiny synthesized UI tick keeps the menu responsive without requiring an external sound file.
   useEffect(() => {
     let lastButton: Element | null = null;
+    let lastPlayedAt = 0;
     const play = (event: MouseEvent) => {
       if (soundMuted) return;
       const button = (event.target as Element).closest(".nav-item");
       const previousButton = (event.relatedTarget as Element | null)?.closest?.(
         ".nav-item",
       );
-      if (!button || button === lastButton || button === previousButton) return;
+      const now = performance.now();
+      if (!button || button === lastButton || button === previousButton || now - lastPlayedAt < 180) return;
       lastButton = button;
+      lastPlayedAt = now;
       try {
         const context = new AudioContext();
         const oscillator = context.createOscillator();
@@ -540,18 +808,9 @@ export default function MainMenu({
     };
   }, [soundMuted]);
 
-  useEffect(() => {
-    if (!isWorldLoading) return;
-    let cancelled = false;
-    Promise.all(WORLD_PRELOAD_IMAGES.map(preloadImage)).then(() => {
-      if (!cancelled) setWorldAssetsReady(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [isWorldLoading]);
-
-  // Keep the selected wallpaper warm in the browser cache after startup.
+  // Keep every possible home wallpaper decoded for the full lifetime of the
+  // menu. This component stays mounted while changing World Map scenes, so a
+  // return to the main menu never waits for its randomly selected wallpaper.
   useEffect(() => {
     let cancelled = false;
     const startedAt = performance.now();
@@ -562,12 +821,28 @@ export default function MainMenu({
       }, remainingDelay);
     };
 
-    preloadImage(homeBackground).then(finish);
+    const selectedImage = new Image();
+    selectedImage.decoding = "async";
+    selectedImage.fetchPriority = "high";
+    selectedImage.src = homeBackground;
+    wallpaperPreloadRef.current = [selectedImage];
+    void preloadImage(homeBackground, "high").then(finish);
+    const cancelIdlePreload = scheduleIdleImagePreload(
+      HOME_BACKGROUNDS.filter((source) => source !== homeBackground),
+    );
 
     return () => {
       cancelled = true;
+      cancelIdlePreload();
+      wallpaperPreloadRef.current = [];
     };
   }, [homeBackground]);
+
+  // Revision is a bitmap-led full-screen dashboard. Decode its board and all
+  // four card layers while the menu is visible so entering it is immediate.
+  useEffect(() => {
+    void preloadRevisionEntry("high");
+  }, []);
 
   const keyBufferRef = useRef("");
   const keyBufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -592,18 +867,18 @@ export default function MainMenu({
           e.preventDefault();
           keyBufferRef.current = "";
           if (section === "world") {
-            setSection("backyard");
+            openSceneWithSound("backyard");
           } else {
             onNewGame();
           }
         } else if (buf.endsWith(".2")) {
           e.preventDefault();
           keyBufferRef.current = "";
-          setSection("shop");
+          openSceneWithSound("shop");
         } else if (buf.endsWith(".3")) {
           e.preventDefault();
           keyBufferRef.current = "";
-          setSection("market");
+          openSceneWithSound("market");
         }
       }
     };
@@ -613,16 +888,46 @@ export default function MainMenu({
       window.removeEventListener("keydown", handler, { capture: true });
   }, [section, setSection, onNewGame, onStartAudio]);
 
+  const currentWorldMapImage = soccerComplete
+    ? WORLD_MAP_NIGHT_IMG
+    : homeComplete
+      ? WORLD_MAP_SUNSET_IMG
+      : shopMemoryComplete
+        ? WORLD_MAP_DAY_IMG
+        : WORLD_MAP_IMG;
+  const showWorldMap = (source = currentWorldMapImage) => {
+    // Keep the current complete screen visible while the map bitmap decodes.
+    // Once mounted, its original page-arrow behaviour remains untouched.
+    void preloadImage(source, "high").then(() => {
+      window.requestAnimationFrame(() => setSection("world"));
+    });
+  };
+  const finishSceneOnMap = (sceneId: string, source = currentWorldMapImage) => {
+    setEndQuizSummary(null);
+    setEndSceneSummary(buildEndSceneSummary(sceneId, activeSaveSlot));
+    showWorldMap(source);
+  };
+  const finishQuizOnMap = (quizId: "bus" | "music", source = currentWorldMapImage) => {
+    setEndSceneSummary(null);
+    setEndQuizSummary(readEndQuizSummary(quizId, activeSaveSlot));
+    showWorldMap(source);
+  };
   const openSection = (next: HubSection) => {
+    if (next === "world") { showWorldMap(); return; }
+    if (next === "revision") {
+      const request = ++sceneEntryRequestRef.current;
+      void preloadRevisionEntry("high").then(() => {
+        if (request !== sceneEntryRequestRef.current) return;
+        window.requestAnimationFrame(() => {
+          setRevisionPracticeOpen(false);
+          setRevisionScenePickerOpen(false);
+          setSection("revision");
+        });
+      });
+      return;
+    }
     setSection(next);
   };
-
-  useEffect(() => {
-    if (isWorldLoading && worldAssetsReady) {
-      setSection("world");
-      setIsWorldLoading(false);
-    }
-  }, [isWorldLoading, worldAssetsReady]);
 
   if (!isMenuReady) {
     return <MenuLoadingScreen isChinese={isChinese} />;
@@ -632,19 +937,21 @@ export default function MainMenu({
     return (
       <WorldMapSection
         onMenu={() => {
-          setWorldReady(false);
           setSection("home");
         }}
         startMapLoaded={true}
-        onOpenMemory={() => setSection("backyard")}
-        onOpenShop={() => setSection("shop")}
-        onOpenMarket={() => setSection("market")}
-        onOpenBus={() => setSection("bus")}
-        onOpenHome={() => setSection("family-home")}
-        onOpenCop={() => setSection("cop")}
-        onOpenSoccer={() => setSection("soccer-match")}
+        onOpenMemory={() => openSceneWithSound("backyard")}
+        onOpenShop={() => openSceneWithSound("shop")}
+        onOpenMarket={() => openSceneWithSound("market")}
+        onOpenBus={() => openSceneWithSound("bus")}
+        onOpenHome={() => openSceneWithSound("family-home")}
+        onOpenCop={() => openSceneWithSound("cop")}
+        onOpenMusic={() => openSceneWithSound("music")}
+        onOpenBaron={() => openSceneWithSound("masked-baron")}
+        onOpenSoccer={() => openSceneWithSound("soccer-match")}
         onSelectSaveSlot={switchSaveSlot}
         activeSaveSlot={activeSaveSlot}
+        revisionHistory={revisionHistory}
         bellaMemoryComplete={bellaMemoryComplete}
         shopMemoryComplete={shopMemoryComplete}
         busComplete={busComplete}
@@ -652,10 +959,12 @@ export default function MainMenu({
         copComplete={copComplete}
         soccerComplete={soccerComplete}
         soundMuted={soundMuted}
+        endSceneSummary={endSceneSummary}
+        onDismissEndSceneSummary={() => setEndSceneSummary(null)}
+        endQuizSummary={endQuizSummary}
+        onDismissEndQuizSummary={() => setEndQuizSummary(null)}
         onToggleSound={() => {
-          const next = !soundMuted;
-          setSoundMuted(next);
-          localStorage.setItem("taletalk-sound-muted", String(next));
+          applySoundMuted(!soundMuted);
         }}
       />
     );
@@ -664,76 +973,88 @@ export default function MainMenu({
   if (section === "backyard")
     return (
       <BackyardAdventure
-        onMenu={() => setSection("world")}
+        onMenu={() => showWorldMap()}
         onComplete={() => {
           localStorage.setItem(progressKey("bella-complete"), "true");
           setBellaMemoryComplete(true);
-          setSection("world");
+          finishSceneOnMap("backyard");
         }}
       />
     );
   if (section === "shop")
     return (
       <BellaShopAdventure
-        onMenu={() => setSection("world")}
+        onMenu={() => showWorldMap()}
         onComplete={() => {
           localStorage.setItem(progressKey("shop-complete"), "true");
           setShopMemoryComplete(true);
-          setSection("world");
+          finishSceneOnMap("icecream", soccerComplete ? WORLD_MAP_NIGHT_IMG : homeComplete ? WORLD_MAP_SUNSET_IMG : WORLD_MAP_DAY_IMG);
         }}
       />
     );
   if (section === "market")
     return (
       <ShopTripAdventure
-        onMenu={() => setSection("world")}
+        onMenu={() => showWorldMap()}
         onComplete={() => {
           localStorage.setItem(progressKey("market-complete"), "true");
-          setSection("world");
+          finishSceneOnMap("shopping");
         }}
       />
     );
   if (section === "bus")
     return (
       <BusTicketAdventure
-        onBack={() => setSection("world")}
+        onBack={() => showWorldMap()}
+        onBusQuizFailed={() => finishQuizOnMap("bus")}
         onBusComplete={() => {
           localStorage.setItem(progressKey("bus-complete"), "true");
           setBusComplete(true);
-          setSection("world");
+          finishQuizOnMap("bus");
         }}
       />
     );
   if (section === "family-home")
     return (
       <HomeAdventure
-        onBack={() => setSection("world")}
+        onBack={() => showWorldMap()}
         onHomeComplete={() => {
           localStorage.setItem(progressKey("home-complete"), "true");
           setHomeComplete(true);
-          setSection("world");
+          finishSceneOnMap("home", soccerComplete ? WORLD_MAP_NIGHT_IMG : WORLD_MAP_SUNSET_IMG);
         }}
       />
     );
   if (section === "cop")
     return (
       <CopAdventure
-        onBack={() => setSection("world")}
+        onBack={() => showWorldMap()}
         onComplete={() => {
           localStorage.setItem(progressKey("cop-complete"), "true");
           setCopComplete(true);
-          setSection("world");
+          finishSceneOnMap("cop");
         }}
       />
     );
+  if (section === "music")
+    return (
+      <NightMusicAdventure
+        onBack={() => showWorldMap()}
+        onComplete={() => {
+          localStorage.setItem(progressKey("music-complete"), "true");
+          finishQuizOnMap("music");
+        }}
+      />
+    );
+  if (section === "masked-baron") return <MaskedBaronAdventure onBack={() => showWorldMap()} onComplete={() => { localStorage.setItem(progressKey("masked-baron-complete"), "true"); finishSceneOnMap("masked-baron"); }} />;
   if (section === "soccer-match")
     return (
       <SportsDayAdventure
-        onBack={() => setSection("world")}
+        onBack={() => showWorldMap()}
         onComplete={() => {
           localStorage.setItem(progressKey("soccer-complete"), "true");
           setSoccerComplete(true);
-          setSection("world");
+          finishSceneOnMap("sports", WORLD_MAP_NIGHT_IMG);
         }}
       />
     );
@@ -786,10 +1107,7 @@ export default function MainMenu({
       onMouseMove={handleMenuMouseMove}
       className={`hub-shell home-shell${homeBackground.includes("island-quest") ? " home-shell-chalkboard" : ""}${homeBackground.includes("notebook-adventure") ? " home-shell-notebook" : ""}`}
     >
-      <div
-        className="home-image"
-        style={{ backgroundImage: `url('${homeBackground}')` }}
-      />
+      <SmoothSceneImage className="home-image" src={homeBackground} alt="" />
       <div className="home-wash" />
       {welcomeGoalOpen && (
         <div className="absolute inset-0 z-[80] grid place-items-center bg-[#081027]/70 p-5 backdrop-blur-sm">
@@ -820,13 +1138,13 @@ export default function MainMenu({
               <div className="flex items-center justify-between">
                 <span>Roam</span>
                 <span>
-                  {roamWords.length}/16 · {roamPercent}%
+                  {roamWords.length}/{ROAM_WORD_TARGET} · {roamPercent}%
                 </span>
               </div>
               <div className="flex items-center justify-between">
                 <span>World Map</span>
                 <span>
-                  {worldMapComplete}/7 · {worldMapPercent}%
+                  {worldMapWordsUnlocked}/{worldMapWordTotal} · {worldMapPercent}%
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -840,6 +1158,9 @@ export default function MainMenu({
             <div className="mt-3 border-t border-white/15 pt-2 text-white">
               <b>Total</b>
               <span className="float-right">{progressPercent}%</span>
+            </div>
+            <div className="mt-2 flex items-center justify-between border-t border-white/15 pt-2 text-white/85">
+              <span>Daily words</span><b>{dailyWords}/{dailyGoal}</b>
             </div>
           </div>
         </div>
@@ -887,15 +1208,11 @@ export default function MainMenu({
               </div>
               <div className="flex justify-between">
                 <span>Achievements</span>
-                <span>{worldMapComplete}/6 unlocked</span>
+                <span>{worldMapScenesComplete}/{Object.keys(completedWorldMapScenes).length} unlocked</span>
               </div>
               <div className="flex justify-between">
                 <span>Words collected</span>
-                <span>{roamWords.length}/16</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Daily words</span>
-                <span>{dailyWords}/{dailyGoal}</span>
+                <span>{roamWords.length + worldMapWordsUnlocked}/{ROAM_WORD_TARGET + worldMapWordTotal}</span>
               </div>
               <div className="flex justify-between">
                 <span>Streak</span>
@@ -916,8 +1233,7 @@ export default function MainMenu({
           className="home-tool-button"
           onClick={() => {
             const next = !soundMuted;
-            setSoundMuted(next);
-            localStorage.setItem("taletalk-sound-muted", String(next));
+            applySoundMuted(next);
           }}
           aria-label={soundMuted ? "Turn sound on" : "Mute sound"}
         >
@@ -942,7 +1258,7 @@ export default function MainMenu({
               </>
             ) : (
               <>
-                Chinese Bridge
+                Korean Bridge
                 <br />
                 <em>English Quest</em>
               </>
@@ -1017,19 +1333,21 @@ export default function MainMenu({
       return (
         <WorldMapSection
           onMenu={() => {
-            setWorldReady(false);
             setSection("home");
           }}
           startMapLoaded={true}
-          onOpenMemory={() => setSection("backyard")}
-          onOpenShop={() => setSection("shop")}
-          onOpenMarket={() => setSection("market")}
-          onOpenBus={() => setSection("bus")}
-          onOpenHome={() => setSection("family-home")}
-          onOpenCop={() => setSection("cop")}
-          onOpenSoccer={() => setSection("soccer-match")}
+          onOpenMemory={() => openSceneWithSound("backyard")}
+          onOpenShop={() => openSceneWithSound("shop")}
+          onOpenMarket={() => openSceneWithSound("market")}
+          onOpenBus={() => openSceneWithSound("bus")}
+          onOpenHome={() => openSceneWithSound("family-home")}
+          onOpenCop={() => openSceneWithSound("cop")}
+          onOpenMusic={() => openSceneWithSound("music")}
+          onOpenBaron={() => openSceneWithSound("masked-baron")}
+          onOpenSoccer={() => openSceneWithSound("soccer-match")}
           onSelectSaveSlot={switchSaveSlot}
           activeSaveSlot={activeSaveSlot}
+          revisionHistory={revisionHistory}
           bellaMemoryComplete={bellaMemoryComplete}
           shopMemoryComplete={shopMemoryComplete}
           busComplete={busComplete}
@@ -1038,9 +1356,7 @@ export default function MainMenu({
           soccerComplete={soccerComplete}
           soundMuted={soundMuted}
           onToggleSound={() => {
-            const next = !soundMuted;
-            setSoundMuted(next);
-            localStorage.setItem("taletalk-sound-muted", String(next));
+            applySoundMuted(!soundMuted);
           }}
         />
       );
@@ -1053,8 +1369,33 @@ export default function MainMenu({
   }
 
   function AdventureSection() {
+    const [highlightedAdventure, setHighlightedAdventure] = useState<"tammy" | "agent">("tammy");
+    const [adventureArtworkReady, setAdventureArtworkReady] = useState(false);
+    const tammyArtwork = assetUrl("scenes/cat/1.png");
+    const agentArtwork = assetUrl("scenes/bond/1.png");
+    const highlightedImage = highlightedAdventure === "tammy"
+      ? tammyArtwork
+      : agentArtwork;
+    useEffect(() => {
+      let active = true;
+      void Promise.all([
+        preloadImage(tammyArtwork, "high"),
+        preloadImage(agentArtwork, "high"),
+      ]).then(() => {
+        if (active) window.requestAnimationFrame(() => setAdventureArtworkReady(true));
+      });
+      return () => { active = false; };
+    }, [agentArtwork, tammyArtwork]);
+    const showAdventureArtwork = (next: "tammy" | "agent") => {
+      const source = next === "tammy" ? tammyArtwork : agentArtwork;
+      void preloadImage(source, "high").then(() => setHighlightedAdventure(next));
+    };
     return (
-      <section className="section-stack">
+      <section
+        className={`section-stack adventure-highlight-menu ${adventureArtworkReady ? "is-composed" : "is-composing"}`}
+        style={{ backgroundImage: adventureArtworkReady ? `linear-gradient(90deg, rgba(8, 12, 11, .94) 0%, rgba(8, 12, 11, .77) 50%, rgba(8, 12, 11, .45) 100%), url('${highlightedImage}')` : undefined }}
+        aria-busy={!adventureArtworkReady}
+      >
         <SectionHeading
           eyebrow={isChinese ? "选择故事" : "Choose your story"}
           title={isChinese ? "冒险" : "Adventure"}
@@ -1065,34 +1406,34 @@ export default function MainMenu({
           }
         />
         <div
-          className="adventure-card active-card"
-          onClick={() => {
-            onNewGame();
-          }}
+          className="adventure-card agent-story-card is-locked"
+          aria-disabled="true"
         >
           <div
             className="adventure-art"
             style={{
-              backgroundImage: `url('${assetUrl("cafe_room.png")}')`,
+              backgroundImage: `url('${assetUrl("scenes/bond/1.png")}')`,
             }}
           />
           <div className="adventure-copy">
             <div className="card-label">
-              {isChinese ? "第一章 · 佛罗伦萨" : "Chapter I · Florence"}
+              {isChinese ? "第二章 · 行动" : "Chapter II · The Operation"}
             </div>
-            <h2>{isChinese ? "谁是猎物？" : "The Man Who Is Prey?"}</h2>
+            <h2>{isChinese ? "佛罗伦萨陷阱" : "The Florence Trap"}</h2>
             <p>
               {isChinese
-                ? "一个男人，被锁在房间里，困在牢笼中？但真正的猎物是谁？"
-                : "You wake in a Florentine café, tied up beside a dead stranger. You remember nothing. But who is really the prey?"}
+                ? "你在佛罗伦萨的一家咖啡馆中醒来，双手被绑，身旁躺着一名死去的陌生人。你失去了记忆，出口都被监视，而一名特工正在逼近。"
+                : "You wake bound in a Florentine café beside a dead stranger, with no memory of how you got there. Every exit is watched—and an agent is closing in."}
             </p>
-            <div className="card-cta">
-              {isChinese ? "开始冒险" : "Begin adventure"} <span>→</span>
+            <div className="card-cta locked-card-cta">
+              <LockKeyhole size={13} /> {isChinese ? "尚未解锁" : "Locked"}
             </div>
           </div>
         </div>
         <div
-          className="adventure-card active-card"
+          className="adventure-card active-card tammy-story-card"
+          onMouseEnter={() => showAdventureArtwork("tammy")}
+          onFocus={() => showAdventureArtwork("tammy")}
           onClick={onStartTammy}
         >
           <div
@@ -1157,29 +1498,150 @@ export default function MainMenu({
   }
 
   function RevisionSection() {
-    const word = revisionWords[revisionIndex];
-    const [mode, setMode] = useState<"normal" | "easy" | "hard">("normal");
-    const letters = [...word.italian];
-    const letterIndexes = letters.map((letter, index) => letter === " " ? -1 : index).filter(index => index >= 0);
-    const normalReveal = new Set([letterIndexes[1], letterIndexes[2], letterIndexes.at(-1)]);
-    const easyReveal = new Set([letterIndexes[0], letterIndexes[1], letterIndexes[2], letterIndexes[4], letterIndexes[5], letterIndexes.at(-1)]);
-    const revealed = mode === "hard" ? new Set<number>() : mode === "easy" ? easyReveal : normalReveal;
-    const hint = letters.map((letter, index) => letter === " " ? " " : revealed.has(index) ? letter : "–").join(" ");
+    const playRevisionCardHover = () => {
+      if (soundMuted) return;
+      try {
+        const context = new AudioContext();
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.frequency.value = 460;
+        gain.gain.setValueAtTime(0.022, context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.07);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(); oscillator.stop(context.currentTime + 0.075);
+      } catch { /* Optional hover sound. */ }
+    };
+    const revisionScenes: Record<Exclude<RevisionCategory, "new">, { title: string; subtitle: string; image: string; words: string[] }[]> = {
+      world: ([
+        { id: "backyard", subtitle: "Chapter One · Bella's first Elderwoods scene.", image: "a1.png" },
+        { id: "icecream", subtitle: "Chapter One · the ice cream shop story.", image: "scenes/bella/b1-woman-no-boards-v2.png" },
+        { id: "shopping", subtitle: "Chapter One · shopping and food words.", image: "scenes/shop/c2-v3.png" },
+        { id: "bus", subtitle: "Chapter One · Jessica's ticket quiz.", image: "scenes/bus/d1.png" },
+        { id: "home", subtitle: "Chapter One · Joshua returns home.", image: "scenes/home/return-home-e1.webp" },
+        { id: "cop", subtitle: "Chapter One · Mason's case.", image: "scenes/cop/i1.png" },
+        { id: "sports", subtitle: "Chapter One · George and Joshua's challenge.", image: "scenes/sports-day/g1.png" },
+        { id: "music", subtitle: "Chapter One · Adam's night-time song.", image: "scenes/music/1a.png" },
+        { id: "masked-baron", subtitle: "Chapter One · Raspy follows the intruder.", image: "scenes/masked-baron/1a.png" },
+      ] as const).map(scene => ({
+        title: SCENE_SUMMARY_DEFINITIONS[scene.id].title,
+        subtitle: scene.subtitle,
+        image: scene.image,
+        words: SCENE_SUMMARY_DEFINITIONS[scene.id].words.map(word => word.korean),
+      })),
+      adventure: [
+        { title: "Tammy's Way Home", subtitle: "Words from Tammy's city adventure.", image: "world-ai/revision/revision-card-adventure-v5.png", words: ["hello", "key"] },
+        { title: "The Agent", subtitle: "Words from the second adventure story.", image: "world-ai/revision/revision-card-adventure-v5.png", words: ["coffee", "thank you"] },
+        { title: "Adventure Path", subtitle: "Review the words gathered in Adventure.", image: "world-ai/elderwoods-map-day-v2.png", words: ["friend", "window"] },
+      ],
+      roam: [
+        { title: "Woodstock, Vermont", subtitle: "Words discovered while roaming Woodstock.", image: "roam/woodstock-vermont-aerial.png", words: ["bridge", "trees", "river"] },
+        { title: "North America", subtitle: "Words gathered across the roaming map.", image: "maps/north-america-roam-map-v2.png", words: ["bridge", "trees", "river"] },
+        { title: "New destinations", subtitle: "Return as you unlock more roaming places.", image: "world-ai/revision/revision-card-roam-v5.png", words: [] },
+      ],
+    };
+    const savedAdventure = (() => { try { return JSON.parse(localStorage.getItem(`taletalk-save-slot-${activeSaveSlot}`) ?? "{}") as { learnedWords?: unknown[]; dictionary?: { french?: string }[] }; } catch { return {}; } })();
+    const adventureWords = [...(savedAdventure?.learnedWords ?? []), ...(savedAdventure?.dictionary ?? []).map((word) => word.french ?? "")]
+      .filter((word): word is string => typeof word === "string" && Boolean(word));
+    const roamUnlocked = readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-roam-collected-words-v2`))
+      .map((word) => typeof word === "object" && word !== null ? (word as { italian?: string }).italian ?? "" : "").filter(Boolean);
+    const worldUnlocked = readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-unlocked-words`)).filter((word): word is string => typeof word === "string");
+    const normalise = (value: string) => value.trim().toLowerCase();
+    const worldRevisionWords: RevisionWord[] = Object.values(SCENE_SUMMARY_DEFINITIONS).flatMap(scene => scene.words.map(item => ({ italian: item.korean, english: item.english, aliases: [item.english, item.historyWord ?? ""].filter(Boolean) })));
+    const makeWord = (value: string): RevisionWord => [...worldRevisionWords, ...revisionWordBank, ...sceneOneRevisionWords].find((item) => normalise(item.italian) === normalise(value) || item.aliases?.some((alias) => normalise(alias) === normalise(value))) ?? { italian: value, english: "Translation coming soon" };
+    const categoryWords = revisionCategory === "adventure" ? adventureWords : revisionCategory === "roam" ? roamUnlocked : worldUnlocked;
+    const unlockedWords = categoryWords.map(makeWord).filter((item, index, list) => list.findIndex((candidate) => normalise(candidate.italian) === normalise(item.italian)) === index);
+    const selectedSceneWords = revisionCategory === "new" ? [] : revisionScenes[revisionCategory].filter((scene) => selectedRevisionScenes.includes(scene.title)).flatMap((scene) => scene.words);
+    const practiceWords = revisionCategory === "new" ? revisionWordBank.filter((item) => ![...adventureWords, ...roamUnlocked, ...worldUnlocked].some((value) => normalise(value) === normalise(item.italian))) : selectedSceneWords.length ? selectedSceneWords.map(makeWord) : unlockedWords;
+    const word = practiceWords[revisionIndex % practiceWords.length] ?? revisionWordBank[0];
+    const revisionRomanisationText: Record<string, string> = {
+      "저는": "jeoneun", "슬퍼요": "seulpeoyo", "아이스크림": "aiseukeurim", "네": "ne",
+      "아이스크림 주세요": "aiseukeurim juseyo", "주세요": "juseyo", "감사합니다": "gamsahamnida", "천만에요": "cheonmaneyo",
+      "가게": "gage", "저녁": "jeonyeok", "음료": "eumryo", "과일": "gwail", "닭고기": "dalgogi", "물": "mul", "사과": "sagwa", "계산하다": "gyesanhada",
+      "꽃": "kkot", "미안해": "mianhae", "커피를 마시다": "keopireul masida", "침대": "chimdae", "문": "mun", "개": "gae", "신문": "sinmun",
+      "시작하다": "sijakhada", "달리다": "dallida", "뛰다": "ttwida", "오르다": "oreuda", "걷다": "geotda", "줍다": "jupda", "나르다": "nareuda", "내려놓다": "naeryeonota", "끝내다": "kkeutnaeda",
+      "앉다": "anjda", "따라가다": "ttaragada", "다리": "dari", "나무": "namu", "강": "gang",
+      "안녕하세요": "annyeonghaseyo", "창문": "changmun", "열쇠": "yeolsoe", "커피": "keopi", "친구": "chingu", "좋은 아침": "joeun achim", "감자": "gamja",
+    };
+    const revisionRomanisedAnswer = revisionRomanisationText[word.italian] ?? "";
+    const locationImage = REVISION_LOCATION_IMAGES[normalise(word.italian)]
+      ?? (revisionCategory === "roam" ? assetUrl("maps/north-america-roam-map-v2.png")
+        : revisionCategory === "adventure" ? assetUrl("cafe_room.png")
+          : TOWN_CENTRE_MAP_IMG);
+    const [mode, setMode] = useState<"normal" | "hard" | "very-hard">("normal");
+    const [revisionRomanisation, setRevisionRomanisation] = useState(() => localStorage.getItem("taletalk-romanisation-enabled") === "true");
+    useEffect(() => { const sync = (event: Event) => setRevisionRomanisation(Boolean((event as CustomEvent<boolean>).detail)); window.addEventListener("taletalk-romanisation-change", sync); return () => window.removeEventListener("taletalk-romanisation-change", sync); }, []);
+    const revisionAnswerTarget = revisionRomanisation && revisionRomanisedAnswer ? revisionRomanisedAnswer : word.italian;
+    const answerCharacters = [...revisionAnswerTarget];
+    const answerIndexes = answerCharacters.map((letter, index) => /\s/.test(letter) ? -1 : index).filter(index => index >= 0);
+    const hiddenCount = Math.max(1, Math.ceil(answerIndexes.length * (mode === "very-hard" ? 1 : mode === "hard" ? .6 : .35)));
+    const hiddenIndexes = new Set(answerIndexes.slice().sort((a, b) => ((a * 17 + answerIndexes.length * 7) % 29) - ((b * 17 + answerIndexes.length * 7) % 29)).slice(0, hiddenCount));
+    const hint = answerCharacters.map((letter, index) => /\s/.test(letter) ? " " : hiddenIndexes.has(index) ? "_" : letter).join(" ");
+    const toggleRevisionRomanisation = () => {
+      const next = !revisionRomanisation;
+      setRevisionRomanisation(next);
+      setRevisionInput("");
+      localStorage.setItem("taletalk-romanisation-enabled", String(next));
+      window.dispatchEvent(new CustomEvent("taletalk-romanisation-change", { detail: next }));
+    };
+    const quizHintIndexes = [...word.italian].map((letter, index) => ({ letter, index })).filter(({ letter }) => !/\s/.test(letter)).slice(0, Math.max(1, Math.ceil([...word.italian].filter(letter => !/\s/.test(letter)).length * .3))).map(({ index }) => index);
     const submit = (event: React.FormEvent) => {
       event.preventDefault();
       const correct =
         isSkipAnswer(revisionInput) ||
-        revisionInput.trim().toLowerCase() === word.italian;
+        revisionInput.trim() === word.italian ||
+        (revisionRomanisation && revisionInput.trim().toLowerCase() === revisionRomanisedAnswer.toLowerCase());
       setRevisionResult(correct ? "correct" : "wrong");
-      if (correct)
-        setTimeout(() => {
-          setRevisionIndex((revisionIndex + 1) % revisionWords.length);
+      setRevisionHistory((history) => {
+        const previous = history[normalise(word.italian)] ?? { attempts: 0, correct: 0, recent: [] };
+        const recent = [...(previous.recent ?? []), { correct, at: Date.now() }].slice(-5);
+        const next = { ...history, [normalise(word.italian)]: { attempts: previous.attempts + 1, correct: previous.correct + (correct ? 1 : 0), recent } };
+        localStorage.setItem(revisionHistoryKey, JSON.stringify(next));
+        return next;
+      });
+      if (revisionCategory === "world") {
+        const selectedScenes = revisionScenes.world.filter((scene) => selectedRevisionScenes.includes(scene.title) && scene.words.some((sceneWord) => normalise(sceneWord) === normalise(word.italian)));
+        const key = `taletalk-slot-${activeSaveSlot}-world-quiz-attempts-v1`;
+        const previous = readStoredArray(localStorage.getItem(key)).filter((attempt): attempt is { scene: string; word: string; correct: boolean; at: number } => typeof attempt === "object" && attempt !== null && typeof (attempt as { scene?: unknown }).scene === "string" && typeof (attempt as { word?: unknown }).word === "string" && typeof (attempt as { correct?: unknown }).correct === "boolean" && typeof (attempt as { at?: unknown }).at === "number");
+        const answerScript = /[a-z]/i.test(revisionInput) ? "Romanisation" : "Hangul";
+        localStorage.setItem(key, JSON.stringify([...previous, ...selectedScenes.map((scene) => ({ scene: scene.title, word: word.english, korean: word.italian, correct, mode, answerScript, at: Date.now() }))].slice(-100)));
+      }
+      if (correct) {
+        speakRevision(word.italian, "female", () => {
+          setRevisionIndex((revisionIndex + 1) % practiceWords.length);
           setRevisionInput("");
+          setRevisionHints(0);
           setRevisionResult(null);
-        }, 700);
+        });
+      }
+    };
+    useEffect(() => {
+      if (!revisionPracticeOpen) {
+        revisionSpokenAudioKeyRef.current = "";
+        return;
+      }
+      const audioKey = `${revisionSceneName}:${revisionIndex}:${word.italian}`;
+      if (revisionSpokenAudioKeyRef.current === audioKey) return;
+      revisionSpokenAudioKeyRef.current = audioKey;
+      speakRevision(word.italian, "female");
+    }, [word.italian, speakRevision]);
+    const worldQuizAttempts = (sceneTitle: string) => readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-world-quiz-attempts-v1`))
+      .filter((attempt): attempt is { scene: string; word: string; correct: boolean; at: number } => typeof attempt === "object" && attempt !== null && (attempt as { scene?: unknown }).scene === sceneTitle && typeof (attempt as { correct?: unknown }).correct === "boolean" && typeof (attempt as { at?: unknown }).at === "number")
+      .sort((a, b) => a.at - b.at).slice(-5);
+    const sceneScore = (scene: { words: string[]; title?: string }) => {
+      const attempts = revisionCategory === "world" && scene.title ? worldQuizAttempts(scene.title) : scene.words.flatMap((sceneWord) => revisionHistory[normalise(sceneWord)]?.recent ?? []).sort((a, b) => a.at - b.at).slice(-5);
+      const correct = attempts.filter((attempt) => attempt.correct).length;
+      return attempts.length ? `${Math.round((correct / attempts.length) * 100)}% correct · ${attempts.length}/5 attempts` : "0% correct · not tested";
     };
     return (
-      <section className="section-stack">
+      <section className={`section-stack revision-screen revision-theme-${revisionTheme}`}>
+        <img className="revision-reference-board" src={assetUrl("world-ai/revision/revision-dashboard-frame-v7.png")} alt="TaleTalk revision dashboard" />
+        <button className="revision-home-button" type="button" onClick={() => setSection("home")} aria-label="Back to main menu">
+          <ChevronLeft aria-hidden="true" />
+          <span>Main menu</span>
+        </button>
+        <div className="revision-ornaments" aria-hidden="true">
+          <Leaf /><Leaf /><Sparkles /><Leaf /><Sparkles /><Leaf />
+        </div>
         <SectionHeading
           eyebrow={isChinese ? "巩固记忆" : "Keep your memory sharp"}
           title={isChinese ? "复习" : "Revision"}
@@ -1189,11 +1651,81 @@ export default function MainMenu({
               : "Short practice rounds for the words you have gathered."
           }
         />
+        <div className="revision-areas" role="tablist" aria-label="Revision areas">
+          {([
+            ["adventure", "Adventure", adventureWords.length, "revision-card-adventure-v5.png"],
+            ["roam", "Roaming", roamUnlocked.length, "revision-card-roam-v5.png"],
+            ["world", "World Map", worldUnlocked.length, "revision-world-town-v1.png"],
+            ["new", "Not unlocked yet", practiceWords.length, "revision-card-locked-v5.png"],
+          ] as [RevisionCategory, string, number, string][]).map(([category, label, count, image]) => (
+            <button key={category} type="button" role="tab" aria-selected={revisionCategory === category} onMouseEnter={playRevisionCardHover} onFocus={playRevisionCardHover} onClick={() => { setRevisionCategory(category); setRevisionProgressOpen(category === "world"); setRevisionWorldChapterOpen(false); setRevisionProgressScene(null); setSelectedRevisionScenes([]); setRevisionIndex(0); setRevisionInput(""); setRevisionResult(null); if (category === "new") { setRevisionSceneName("Not unlocked yet"); setRevisionSceneImage("world-ai/revision/revision-card-locked-v5.png"); setRevisionPracticeOpen(true); } else { setRevisionScenePickerOpen(true); } }} className={revisionCategory === category ? "active" : ""}>
+              <img className="revision-card-art" src={assetUrl(`world-ai/revision/${image}`)} alt="" />
+              <span>{label}</span><b>{category === "world" ? "探索世界，拓展词汇边界" : category === "new" ? `${count} to practise` : `${count} unlocked`}</b>
+            </button>
+          ))}
+        </div>
+        {revisionScenePickerOpen && revisionCategory !== "new" && (
+          <div className={`revision-scene-picker ${revisionCategory === "world" ? `revision-world-picker ${revisionWorldChapterOpen ? "chapter-open" : ""}` : ""}`} role="dialog" aria-modal="true" aria-label={`${revisionCategory} scenes`}>
+            <section>
+              <button className="revision-dialog-home" type="button" onClick={() => { setRevisionScenePickerOpen(false); setSection("home"); }} aria-label="Back to main menu"><ChevronLeft aria-hidden="true" /> Main menu</button>
+              <button className="revision-sheet-close" onClick={() => setRevisionScenePickerOpen(false)} aria-label="Close scene picker">×</button>
+              <p>{revisionCategory === "world" ? "WORLD MAP" : "CHOOSE A SCENE"}</p>
+              <h2>{revisionCategory === "world" ? "Choose a chapter or section" : revisionCategory === "roam" ? "Roaming" : "Adventure"}</h2>
+              {revisionCategory === "world" && <button className="revision-world-chapter-bar" type="button" aria-expanded={revisionWorldChapterOpen} onClick={() => setRevisionWorldChapterOpen(open => !open)}><span><small>CHAPTER ONE</small><strong>The Elderwoods</strong></span><b>{revisionWorldChapterOpen ? "Hide −" : "Expand +"}</b></button>}
+              {revisionCategory === "world" ? <><div className="revision-world-scene-rows">{revisionScenes.world.map((scene) => { const selected = selectedRevisionScenes.includes(scene.title); return <div className={`revision-world-scene-row ${selected ? "selected" : ""}`} key={scene.title}><button className="revision-world-scene-button" type="button" style={{ backgroundImage: `linear-gradient(90deg,rgba(7,51,47,.91),rgba(7,51,47,.52)),url('${assetUrl(scene.image)}')` }} onClick={() => setSelectedRevisionScenes((scenes) => selected ? scenes.filter((title) => title !== scene.title) : [...scenes, scene.title])}><span><strong>{scene.title}</strong><small>{scene.subtitle}</small></span><i aria-hidden="true">{selected ? "✓" : ""}</i></button><div className="revision-world-progress-row"><img src={assetUrl(scene.image)} alt="" /><span><b>{scene.title}</b><em>{sceneScore(scene)}</em></span></div></div>; })}</div><div className="revision-world-actions"><button className="revision-begin-test" type="button" disabled={!selectedRevisionScenes.length} onClick={() => { const selected = revisionScenes.world.filter((scene) => selectedRevisionScenes.includes(scene.title)); setRevisionSceneName(selected.map((scene) => scene.title).join(" + ")); setRevisionSceneImage(selected[0]?.image ?? "world-ai/revision/revision-world-town-v1.png"); setRevisionIndex(0); setRevisionScenePickerOpen(false); setRevisionPracticeOpen(true); }}>Begin test · {selectedRevisionScenes.length} selected</button><button className="revision-show-stats" type="button" disabled={!selectedRevisionScenes.length} onClick={() => setRevisionWorldStatsOpen(true)}>Show stats</button></div>{revisionWorldStatsOpen && <div className="revision-world-stats" role="dialog" aria-modal="true"><section><button onClick={() => setRevisionWorldStatsOpen(false)} aria-label="Close statistics">×</button><h3>Quiz results</h3>{(() => { const attempts = readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-world-quiz-attempts-v1`)).filter((attempt): attempt is { scene: string; word: string; correct: boolean } => typeof attempt === "object" && attempt !== null && typeof (attempt as { scene?: unknown }).scene === "string" && typeof (attempt as { word?: unknown }).word === "string" && typeof (attempt as { correct?: unknown }).correct === "boolean").filter((attempt) => selectedRevisionScenes.includes(attempt.scene)); const words = [...new Set(attempts.map((attempt) => attempt.word))]; const correct = attempts.filter((attempt) => attempt.correct).length; return <><strong>{attempts.length ? `${Math.round((correct / attempts.length) * 100)}% overall` : "No attempts yet"}</strong>{words.length ? words.map((word) => { const wordAttempts = attempts.filter((attempt) => attempt.word === word); return <p key={word}><b>{word}</b><span>{wordAttempts.filter((attempt) => attempt.correct).length} correct · {wordAttempts.filter((attempt) => !attempt.correct).length} wrong</span></p>; }) : <p>No quiz attempts for the selected scenes yet.</p>}</>; })()}</section></div>}</> : <div className="revision-scene-list">
+                  {revisionScenes[revisionCategory].map((scene) => (
+                    <label key={scene.title} className={selectedRevisionScenes.includes(scene.title) ? "selected" : ""}>
+                      <input type="checkbox" checked={selectedRevisionScenes.includes(scene.title)} onChange={() => { if (revisionCategory === "world") { setRevisionSceneName(scene.title); setRevisionSceneImage(scene.image); setRevisionIndex(0); setRevisionScenePickerOpen(false); setRevisionPracticeOpen(true); return; } setSelectedRevisionScenes((selected) => selected.includes(scene.title) ? selected.filter((title) => title !== scene.title) : [...selected, scene.title]); }} />
+                      <img src={assetUrl(scene.image)} alt="" />
+                      <span><strong>{scene.title}</strong><small>{scene.subtitle}</small><em>Words: {scene.words.join(" · ")}</em><b>Quiz result: {sceneScore(scene)}</b></span>
+                      <i aria-hidden="true">✓</i>
+                    </label>
+                  ))}
+              </div>}
+              <button className="revision-begin-test" type="button" disabled={!selectedRevisionScenes.length} onClick={() => { const selected = revisionScenes[revisionCategory].filter((scene) => selectedRevisionScenes.includes(scene.title)); setRevisionSceneName(selected.map((scene) => scene.title).join(" + ")); setRevisionSceneImage(selected[0]?.image ?? "world-ai/revision/revision-world-town-v1.png"); setRevisionIndex(0); setRevisionScenePickerOpen(false); setRevisionPracticeOpen(true); }}>Begin test · {selectedRevisionScenes.length} selected</button>
+            </section>
+          </div>
+        )}
+        {revisionWorldStatsOpen && <RevisionWorldStats slot={activeSaveSlot} scenes={selectedRevisionScenes} onClose={() => setRevisionWorldStatsOpen(false)} />}
+        {revisionPracticeOpen && (
+          <div className="revision-quiz-screen" role="dialog" aria-modal="true">
+            <SmoothSceneImage className="revision-quiz-image" src={locationImage} alt={`The scene where ${word.english} was learned`} />
+            <div className="revision-quiz-shade" />
+            <button className="revision-quiz-home" type="button" onClick={() => { setRevisionPracticeOpen(false); setRevisionScenePickerOpen(false); setSection("home"); }} aria-label="Back to main menu"><ChevronLeft aria-hidden="true" /> Main menu</button>
+            <button className="revision-quiz-back" onClick={() => { setRevisionPracticeOpen(false); if (revisionCategory !== "new") setRevisionScenePickerOpen(true); }} aria-label="Back to scene list"><ChevronLeft aria-hidden="true" /> Scenes</button>
+            <section data-task-editor-panel="revision-quiz" className="revision-quiz-panel bus-quiz-panel">
+              <div data-task-editor-item="heading" className="scene-eyebrow">{revisionSceneName || (revisionCategory === "new" ? "NOT UNLOCKED YET" : `${revisionCategory.toUpperCase()} WORDS`)} · REVISION</div>
+              <div data-task-editor-item="progress" className="scene-progress">Word {revisionIndex + 1} / {practiceWords.length} · Revision</div>
+              <div className="revision-quiz-controls">
+              <div data-task-editor-item="mode">
+                <QuizModeMenu value={mode} options={["normal", "hard", "very-hard"]} onChange={value => setMode(value as Exclude<QuizModeValue, "easy">)} />
+              </div>
+              <button className={`revision-romanisation-toggle ${revisionRomanisation ? "active" : ""}`} type="button" onClick={toggleRevisionRomanisation} aria-pressed={revisionRomanisation}>
+                Romanisation <span aria-hidden="true">{revisionRomanisation ? "✓" : ""}</span>
+              </button>
+              </div>
+              <div className="revision-bus-answer"><strong data-task-editor-item="answer-english">{capitaliseStandalone(word.english)}</strong>{revisionInput && <LiveTypingFeedback data-task-editor-item="answer-typed" target={revisionAnswerTarget} value={revisionInput} />}</div>
+              <p data-task-editor-item="letter-hint" className="font-mono text-xl tracking-[.16em] text-[#f0d88f]">{hint}</p>
+              <form data-task-editor-item="answer-form" className="scene-form" onSubmit={submit}><input autoFocus value={revisionInput} onChange={(event) => setRevisionInput(event.target.value)} placeholder={revisionRomanisation ? "Type the romanised answer…" : "Type the Korean word…"} /><button>Enter</button></form>
+              <div data-task-editor-item="hints" className="scene-hint"><Lightbulb size={15} /><span>{revisionHints === 0 ? "Hints can help you remember." : "Hints used:"}{revisionHints >= 1 && <> 1. Read the Korean word aloud.</>}{revisionHints >= 2 && <>  2. {[...word.italian].map((letter, index) => quizHintIndexes.includes(index) ? letter : /\s/.test(letter) ? " " : "_").join(" ")}</>}{revisionHints >= 3 && <>  3. {word.italian}</>}</span><button type="button" onClick={() => setRevisionHints((count) => Math.min(3, count + 1))} disabled={revisionHints >= 3}>{revisionHints >= 3 ? "Hints used" : `Hint ${revisionHints + 1} · −5%`}</button></div>
+              {revisionResult && <small data-task-editor-item="result">{revisionResult === "correct" ? "Correct! Continue to the next question." : `Incorrect. Correct answer: ${capitaliseStandalone(revisionRomanisation ? revisionRomanisedAnswer : word.italian)}.`}</small>}
+            </section>
+          </div>
+        )}
+        <section className="revision-memory-card">
+          <img src={locationImage} alt={`Where you learned ${word.italian}`} />
+          <div>
+            <span>WHERE YOU LEARNED IT</span>
+            <h2>{word.italian}</h2>
+            <p>{revisionCategory === "roam" ? "Found while roaming the world map." : revisionCategory === "world" ? "Unlocked during a World Map adventure." : revisionCategory === "new" ? "Preview this word before you unlock it." : "Found in your adventure."}</p>
+            <small className="revision-word-history">Test history · {(revisionHistory[normalise(word.italian)]?.attempts ?? 0)} attempts · {(revisionHistory[normalise(word.italian)]?.correct ?? 0)} correct</small>
+          </div>
+        </section>
         <div className="practice-card">
           <div className="practice-top">
             <span>{isChinese ? "单词冲刺" : "Word sprint"}</span>
             <span>
-              {revisionIndex + 1} / {revisionWords.length}
+              {revisionIndex % practiceWords.length + 1} / {practiceWords.length}
             </span>
           </div>
           <div className="practice-prompt">{word.english}</div>
@@ -1201,9 +1733,9 @@ export default function MainMenu({
           <div className="mb-3 flex flex-wrap gap-2">
             <button type="button" className={`rounded-lg px-3 py-2 text-xs ${mode === "easy" ? "bg-emerald-400 text-slate-900" : "bg-white/10"}`} onClick={() => setMode("easy")}>Easy mode · 2 more letters</button>
             <button type="button" className={`rounded-lg px-3 py-2 text-xs ${mode === "hard" ? "bg-amber-300 text-slate-900" : "bg-white/10"}`} onClick={() => setMode("hard")}>Hard mode · no hint · 120%</button>
-            <button type="button" className="rounded-lg bg-white/10 px-3 py-2 text-xs" onClick={() => setSection("backyard")}>Where did this appear?</button>
           </div>
           <p>{isChinese ? "输入英语单词" : "Type the English word"}</p>
+          <LiveTypingFeedback target={word.italian} value={revisionInput} className="mb-2 block text-lg" />
           <form onSubmit={submit} className="answer-form">
             <input
               autoFocus
@@ -1230,7 +1762,7 @@ export default function MainMenu({
             </div>
           )}
           <div className="practice-dots">
-            {revisionWords.map((_, index) => (
+            {practiceWords.map((_, index) => (
               <span
                 key={index}
                 className={index === revisionIndex ? "active" : ""}
@@ -1243,6 +1775,28 @@ export default function MainMenu({
   }
 
   function MultiplayerSection() {
+    return (
+      <section className="section-stack">
+        <SectionHeading eyebrow="Online play" title="Play with others" description="Choose how you want to play online." />
+        <div className="revision-areas" role="tablist" aria-label="Online play modes">
+          {([
+            ["normal", "Normal", "Casual games"],
+            ["matchmaking", "Matchmaking", "Find an opponent"],
+            ["placement", "Placement", "Set your starting rank"],
+          ] as ["normal" | "matchmaking" | "placement", string, string][]).map(([mode, label, note]) => (
+            <button key={mode} type="button" role="tab" aria-selected={onlineMode === mode} onClick={() => setOnlineMode(mode)} className={onlineMode === mode ? "active" : ""}>
+              <span>{label}</span><b>{note}</b>
+            </button>
+          ))}
+        </div>
+        <div className="match-card">
+          <div className="match-header"><div className="player"><div className="avatar you"><Users size={18} /></div><span>{onlineMode === "normal" ? "Normal match" : onlineMode === "matchmaking" ? "Matchmaking" : "Placement match"}</span></div><div className="versus">VS</div><div className="player rival"><div className="avatar">?</div><span>Another player</span></div></div>
+          <p>{onlineMode === "normal" ? "A relaxed game with another player, with no rank at stake." : onlineMode === "matchmaking" ? "Find a player at your level for a competitive vocabulary match." : "Play placement games to choose your starting rank."}</p>
+          <button type="button" className="matchmaking-button" onClick={() => window.alert("Online matching is unavailable right now. Please try again later.")}>{onlineMode === "normal" ? "Play normal" : onlineMode === "matchmaking" ? "Find a match" : "Start placement"}</button>
+        </div>
+      </section>
+    );
+    /* Legacy computer-opponent round retained below while online matchmaking is unavailable. */
     const questions = [
       { prompt: "早上好", answer: "good morning" },
       { prompt: "朋友", answer: "friend" },
@@ -1300,6 +1854,7 @@ export default function MainMenu({
           </div>
           <div className="practice-prompt">{question.prompt}</div>
           <p>{isChinese ? "输入对应的英语答案" : "Type the English answer"}</p>
+          <LiveTypingFeedback target={question.answer} value={multiInput} className="mb-2 block text-lg" />
           <form onSubmit={submit} className="answer-form">
             <input
               autoFocus
@@ -1389,9 +1944,12 @@ type WorldMapProps = {
   onOpenBus: () => void;
   onOpenHome: () => void;
   onOpenCop: () => void;
+  onOpenMusic: () => void;
+  onOpenBaron: () => void;
   onOpenSoccer: () => void;
   onSelectSaveSlot: (slot: number) => void;
   activeSaveSlot: number;
+  revisionHistory: QuizHistory;
   bellaMemoryComplete: boolean;
   shopMemoryComplete: boolean;
   busComplete: boolean;
@@ -1400,7 +1958,126 @@ type WorldMapProps = {
   soccerComplete: boolean;
   soundMuted: boolean;
   onToggleSound: () => void;
+  endSceneSummary?: EndSceneSummary | null;
+  onDismissEndSceneSummary?: () => void;
+  endQuizSummary?: EndQuizSummary | null;
+  onDismissEndQuizSummary?: () => void;
 };
+
+function EndSceneSummaryCard({ summary, onClose }: { summary: EndSceneSummary; onClose: () => void }) {
+  return (
+    <div className="world-scene-summary-backdrop" role="dialog" aria-modal="true" aria-label={`${summary.title} results`}>
+      <section className="world-scene-summary-card">
+        <header>
+          <p>Scene complete</p>
+          <h2>{summary.title}</h2>
+          <strong>You unlocked {summary.unlocked}/{summary.total} words</strong>
+        </header>
+        <div className="world-scene-summary-words">
+          {summary.words.map((word) => (
+            <article key={`${word.korean}-${word.english}`} className={word.unlocked ? "is-unlocked" : "is-locked"}>
+              <div className="world-scene-summary-word">
+                <b>{word.korean}</b>
+                <span>{word.english}</span>
+              </div>
+              <dl>
+                <div><dt>Seen before</dt><dd>{word.seenBefore} {word.seenBefore === 1 ? "time" : "times"}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+        <button className="world-scene-summary-continue" onClick={onClose}>Continue on the map</button>
+      </section>
+    </div>
+  );
+}
+
+function EndQuizSummaryCard({ summary, onClose }: { summary: EndQuizSummary; onClose: () => void }) {
+  const modeLabel = (mode: QuizSummaryMode) => mode === "very-hard" ? "Very Hard" : mode.charAt(0).toUpperCase() + mode.slice(1);
+  return (
+    <div className="world-scene-summary-backdrop" role="dialog" aria-modal="true" aria-label={`${summary.title} quiz results`}>
+      <section className="world-scene-summary-card world-quiz-summary-card">
+        <header>
+          <p>Quiz summary</p>
+          <h2>{summary.title}</h2>
+          <strong>Grade {summary.grade}% · {summary.correct}/{summary.total} correct</strong>
+          <span className={summary.passed ? "quiz-summary-pass" : "quiz-summary-fail"}>{summary.passed ? "Passed" : "At least 50% is required to pass"}</span>
+        </header>
+        <div className="world-scene-summary-words world-quiz-summary-words">
+          {summary.words.map((word) => (
+            <article key={`${word.korean}-${word.english}`} className={word.correct ? "is-correct" : "is-incorrect"}>
+              <div className="world-scene-summary-word">
+                <b>{word.korean}</b>
+                <span>{word.english}</span>
+              </div>
+              <dl>
+                <div><dt>Correct in quizzes</dt><dd>{word.correctTimes} {word.correctTimes === 1 ? "time" : "times"}</dd></div>
+                <div><dt>Mode</dt><dd>{modeLabel(word.mode)}</dd></div>
+                <div><dt>Last correct answer</dt><dd>{word.answerScript ?? "Not recorded"}</dd></div>
+                <div><dt>This quiz</dt><dd className={word.correct ? "quiz-word-correct" : "quiz-word-incorrect"}>{word.correct ? "Correct" : "Incorrect"}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+        <button className="world-scene-summary-continue" onClick={onClose}>Continue on the map</button>
+      </section>
+    </div>
+  );
+}
+
+type CollectionWord = { korean: string; english: string };
+type CollectionScene = { title: string; complete: boolean; unlocked: number; words: CollectionWord[] };
+type CollectionArea = { title: string; scenes: CollectionScene[] };
+type CollectionChapter = { title: string; areas: CollectionArea[] };
+
+function WorldMapCollection({ words, chapters, onClose }: { words: CollectionWord[]; chapters: CollectionChapter[]; onClose: () => void }) {
+  const completedCount = chapters.flatMap(chapter => chapter.areas).flatMap(area => area.scenes).filter(scene => scene.complete).length;
+  return (
+    <div className="world-collection-backdrop" role="dialog" aria-modal="true" aria-label="Collection" onClick={onClose}>
+      <section className="world-collection-card" onClick={event => event.stopPropagation()}>
+        <header>
+          <div><p>Your progress</p><h2>Collection</h2></div>
+          <button onClick={onClose} aria-label="Close collection"><X size={19} /></button>
+        </header>
+        <div className="world-collection-content">
+          <section className="world-collection-section world-collection-progress-section">
+            <div className="world-collection-heading"><h3>Chapters completed so far</h3><span>{completedCount}</span></div>
+            <div className="world-collection-chapters">
+              {chapters.map(chapter => {
+                const chapterScenes = chapter.areas.flatMap(area => area.scenes);
+                const chapterUnlocked = chapterScenes.reduce((total, scene) => total + scene.unlocked, 0);
+                const chapterWords = chapterScenes.reduce((total, scene) => total + scene.words.length, 0);
+                return <details className="world-collection-chapter" key={chapter.title}>
+                  <summary><b>{chapter.title}</b><span>{chapterUnlocked}/{chapterWords}</span></summary>
+                  <div className="world-collection-areas">
+                    {chapter.areas.map(area => {
+                      const areaUnlocked = area.scenes.reduce((total, scene) => total + scene.unlocked, 0);
+                      const areaWords = area.scenes.reduce((total, scene) => total + scene.words.length, 0);
+                      const visibleScenes = area.scenes.filter(scene => scene.complete || scene.unlocked > 0);
+                      return <details className="world-collection-area" key={area.title}>
+                        <summary><b>{area.title}</b><span>{areaUnlocked}/{areaWords}</span></summary>
+                        {visibleScenes.length ? <div className="world-collection-scenes">{visibleScenes.map(scene => <details className="world-collection-scene" key={scene.title}>
+                          <summary><span>{scene.complete && <Check size={14} />} {scene.title}</span><small>{scene.unlocked}/{scene.words.length} words</small></summary>
+                          <div>{scene.words.slice().sort((a, b) => a.english.localeCompare(b.english)).map(word => <p key={`${scene.title}-${word.korean}`}><b>{word.english}</b><span>{word.korean}</span></p>)}</div>
+                        </details>)}</div> : <p>No scenes completed yet.</p>}
+                      </details>;
+                    })}
+                  </div>
+                </details>;
+              })}
+            </div>
+          </section>
+          <section className="world-collection-section world-collection-words-section">
+            <div className="world-collection-heading"><h3>Saved words</h3><span>{words.length}</span></div>
+            {words.length ? <div className="world-collection-word-grid">
+              {words.map(word => <article key={`${word.korean}-${word.english}`} data-korean-guide={word.korean}><b>{word.english}</b><span>{word.korean}</span></article>)}
+            </div> : <p className="world-collection-empty">Words you unlock will be saved here.</p>}
+          </section>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 function WorldMapSection({
   onMenu,
@@ -1410,8 +2087,11 @@ function WorldMapSection({
   onOpenBus,
   onOpenHome,
   onOpenCop,
+  onOpenMusic,
+  onOpenBaron,
   onOpenSoccer,
   activeSaveSlot,
+  revisionHistory,
   bellaMemoryComplete,
   shopMemoryComplete,
   busComplete,
@@ -1420,6 +2100,10 @@ function WorldMapSection({
   soccerComplete,
   soundMuted,
   onToggleSound,
+  endSceneSummary = null,
+  onDismissEndSceneSummary = () => undefined,
+  endQuizSummary = null,
+  onDismissEndQuizSummary = () => undefined,
 }: WorldMapProps) {
   const { isChinese } = useLanguage();
   const soundActionLabel = isChinese
@@ -1428,35 +2112,192 @@ function WorldMapSection({
   const [mapPage, setMapPage] = useState<"elderwoods" | "town-centre">(
     "elderwoods",
   );
+  const [mapSwitching, setMapSwitching] = useState(false);
+  const [collectionOpen, setCollectionOpen] = useState(false);
+  const [worldMapSettingsOpen, setWorldMapSettingsOpen] = useState(false);
+  const mapSwitchRequestRef = useRef(0);
+  const [progressOpen, setProgressOpen] = useState(true);
   const marketComplete =
     localStorage.getItem(`taletalk-slot-${activeSaveSlot}-market-complete`) ===
     "true";
-  const progress = [
-    bellaMemoryComplete,
-    shopMemoryComplete,
-    marketComplete,
-    busComplete,
-    homeComplete,
-    savedCopComplete,
-    soccerComplete,
-  ].filter(Boolean).length;
+  const busScore = readBestQuizScore("bus", activeSaveSlot);
+  const savedMusicQuizSummary = readEndQuizSummary("music", activeSaveSlot);
+  const musicScore = readBestQuizScore("music", activeSaveSlot)
+    ?? savedMusicQuizSummary?.grade
+    ?? null;
+  const musicComplete = localStorage.getItem(`taletalk-slot-${activeSaveSlot}-music-complete`) === "true";
+  const maskedBaronComplete = localStorage.getItem(`taletalk-slot-${activeSaveSlot}-masked-baron-complete`) === "true";
   // Sports Day now completes Elderwoods. The next map then introduces Mason.
   const copComplete = savedCopComplete || homeComplete;
-  const mapTime = marketComplete
-    ? "4:16 PM"
-    : shopMemoryComplete
-      ? "3:45 PM"
-      : bellaMemoryComplete
-        ? "3:14 PM"
-        : "2:12 PM";
+  const mapTime = musicComplete
+    ? "12:12 AM"
+    : savedCopComplete
+      ? "10:11 PM"
+      : soccerComplete
+        ? "8:41 PM"
+        : homeComplete
+          ? "6:01 PM"
+          : busComplete
+            ? "3:01 PM"
+            : marketComplete
+              ? "2:39 PM"
+              : shopMemoryComplete
+                ? "2:12 PM"
+                : bellaMemoryComplete
+                  ? "1:49 PM"
+                  : "1:23 PM";
   // This intentionally changes only the backdrop; all point coordinates below stay untouched.
   const elderwoodsMapImage = soccerComplete
     ? WORLD_MAP_NIGHT_IMG
     : homeComplete
       ? WORLD_MAP_SUNSET_IMG
       : shopMemoryComplete
-        ? WORLD_MAP_DAY_IMG
-        : WORLD_MAP_IMG;
+      ? WORLD_MAP_DAY_IMG
+      : WORLD_MAP_IMG;
+  useEffect(() => {
+    [WORLD_MAP_IMG, WORLD_MAP_DAY_IMG, WORLD_MAP_SUNSET_IMG, WORLD_MAP_NIGHT_IMG, TOWN_CENTRE_MAP_IMG]
+      .forEach(source => void preloadImage(source, "high"));
+    // Once the map itself is ready, warm every story's real first frame in
+    // the background. Pointer hover still prioritises the likely choice, while
+    // this also covers touch input where no hover event exists.
+    return scheduleIdleImagePreload(Object.values(WORLD_SCENE_ENTRY_IMAGES));
+  }, []);
+  const switchMapPage = (page: "elderwoods" | "town-centre") => {
+    if (page === mapPage || mapSwitching) return;
+    const request = ++mapSwitchRequestRef.current;
+    const destinationImage = page === "town-centre" ? TOWN_CENTRE_MAP_IMG : elderwoodsMapImage;
+    // Keep the current map and its markers intact while the destination
+    // decodes. Once ready, the new bitmap and overlay enter the same render.
+    void preloadImage(destinationImage, "high").then(() => {
+      if (request !== mapSwitchRequestRef.current) return;
+      setMapSwitching(true);
+      setMapPage(page);
+    });
+  };
+  const chapterScenes = [
+    { title: "Scene One", note: "Chapter One · The first Elderwoods scene.", image: "a1.png", words: ["hello", "friend"], complete: bellaMemoryComplete, available: true, open: onOpenMemory },
+    { title: "Ice Cream Shop", note: "Chapter One · The ice cream shop story.", image: "scenes/shop/c1-v3.png", words: ["ice cream", "water"], complete: shopMemoryComplete, available: bellaMemoryComplete, open: onOpenShop },
+    { title: "Shopping Centre", note: "Chapter One · Shopping and food words.", image: "scenes/shop/c2-v3.png", words: ["water", "coffee"], complete: marketComplete, available: shopMemoryComplete, open: onOpenMarket },
+    { title: "Returning Home", note: "Chapter One · Home and family words.", image: "scenes/home/e1-enhanced.png", words: ["window", "bed"], complete: homeComplete, available: marketComplete, open: onOpenHome },
+    { title: "Detective Mason", note: "Chapter One · Mason's case.", image: "scenes/cop/i1.png", words: ["carry", "key"], complete: savedCopComplete, available: homeComplete, open: onOpenCop },
+    { title: "Sports Day", note: "Chapter One · Josh and William's challenge.", image: "scenes/sports-day/g1.png", words: ["run", "jump"], complete: soccerComplete, available: savedCopComplete, open: onOpenSoccer },
+  ];
+  const collectionNormalise = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const resolveCollectionWord = (value: string): CollectionWord => {
+    const key = collectionNormalise(value);
+    const known = COLLECTION_WORD_BANK.find(word =>
+      [word.korean, word.english, word.historyWord ?? ""].some(alias => collectionNormalise(alias) === key),
+    );
+    if (known) return { korean: known.korean, english: known.english };
+    const isKorean = /[가-힣]/.test(value);
+    return isKorean
+      ? { korean: value, english: "Meaning not recorded" }
+      : { korean: "Korean not recorded", english: capitaliseStandalone(value) };
+  };
+  const collectionWords = (() => {
+    const rawWords = new Set(
+      readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-unlocked-words`))
+        .filter((word): word is string => typeof word === "string" && Boolean(word.trim())),
+    );
+    Object.values(SCENE_SUMMARY_DEFINITIONS).filter(scene => !scene.scored).forEach(scene => {
+      readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-scene-${scene.storageScene}-words`))
+        .filter((word): word is string => typeof word === "string" && Boolean(word.trim()))
+        .forEach(word => rawWords.add(word));
+    });
+    const seen = new Set<string>();
+    return [...rawWords].map(raw => {
+      return resolveCollectionWord(raw);
+    }).filter(word => {
+      const key = collectionNormalise(word.korean);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).sort((a, b) => a.english.localeCompare(b.english, undefined, { sensitivity: "base" }) || a.korean.localeCompare(b.korean));
+  })();
+  const maskedBaronWordRequirement = 33;
+  const maskedBaronUnlocked = maskedBaronComplete || collectionWords.length >= maskedBaronWordRequirement;
+  const collectionSceneWords = (values: string[]) => values.map(resolveCollectionWord)
+    .filter((word, index, list) => list.findIndex(candidate => collectionNormalise(candidate.korean) === collectionNormalise(word.korean)) === index);
+  const collectionScene = (sceneId: string, title: string, complete: boolean): CollectionScene => {
+    const definition = SCENE_SUMMARY_DEFINITIONS[sceneId];
+    const saved = new Set(
+      readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-scene-${definition.storageScene}-words`))
+        .filter((word): word is string => typeof word === "string")
+        .map(collectionNormalise),
+    );
+    const unlocked = complete ? definition.words.length : definition.words.filter(word =>
+      [word.korean, word.english, word.historyWord ?? ""].some(alias => saved.has(collectionNormalise(alias))),
+    ).length;
+    return { title, complete, unlocked, words: collectionSceneWords(definition.words.map(word => word.korean)) };
+  };
+  const sceneProgressBadge = (sceneId: string, completed = false) => {
+    const definition = SCENE_SUMMARY_DEFINITIONS[sceneId];
+    if (!definition || definition.scored) return "★";
+    const saved = new Set(
+      readStoredArray(localStorage.getItem(`taletalk-slot-${activeSaveSlot}-scene-${definition.storageScene}-words`))
+        .filter((word): word is string => typeof word === "string")
+        .map(collectionNormalise),
+    );
+    const unlocked = completed ? definition.words.length : definition.words.filter(word =>
+      [word.korean, word.english, word.historyWord ?? ""].some(alias => saved.has(collectionNormalise(alias))),
+    ).length;
+    return `${unlocked}/${definition.words.length}`;
+  };
+  const collectionChapters: CollectionChapter[] = [
+    { title: "Chapter I", areas: [
+      { title: "Elderwoods", scenes: [
+        collectionScene("backyard", "Scene One", bellaMemoryComplete),
+        collectionScene("icecream", "Ice Cream Shop", shopMemoryComplete),
+        collectionScene("shopping", "Shopping Centre", marketComplete),
+        collectionScene("home", "Returning Home", homeComplete),
+        collectionScene("sports", "Sports Day", soccerComplete),
+      ] },
+      { title: "Town Centre", scenes: [
+        collectionScene("cop", "Detective Mason", savedCopComplete),
+        collectionScene("masked-baron", "The Masked Baron", maskedBaronComplete),
+      ] },
+    ] },
+  ];
+  const collectionButton = (
+    <button className="world-map-collection-button" onClick={() => setCollectionOpen(true)}>
+      <BookOpen size={19} />
+      <strong>Collection</strong>
+    </button>
+  );
+  const collectionPanel = collectionOpen ? <WorldMapCollection words={collectionWords} chapters={collectionChapters} onClose={() => setCollectionOpen(false)} /> : null;
+  const worldMapSettings = (
+    <div className="map-settings">
+      <button className="map-settings-trigger" type="button" onClick={() => setWorldMapSettingsOpen((open) => !open)} aria-label="World Map settings" aria-expanded={worldMapSettingsOpen}>
+        <Settings size={20} />
+      </button>
+      {worldMapSettingsOpen && <div className="map-settings-menu">
+        <button onClick={onToggleSound} aria-label={soundMuted ? "Turn sound on" : "Mute sound"}>
+          {soundMuted ? <Volume2 size={15} /> : <VolumeX size={15} />}{soundActionLabel}
+        </button>
+        <button onClick={onMenu}>Menu</button>
+      </div>}
+    </div>
+  );
+  const sceneQuizScore = (words: string[]) => {
+    const attempts = words.flatMap((word) => revisionHistory[word.toLowerCase()]?.recent ?? []).sort((a, b) => a.at - b.at).slice(-5);
+    return { attempts: attempts.length, percent: attempts.length ? Math.round((attempts.filter((attempt) => attempt.correct).length / attempts.length) * 100) : 0 };
+  };
+  if (false) return (
+    <div className="world-chapter-screen">
+      <header className="world-chapter-header">
+        <button onClick={onMenu}><ChevronLeft size={16} /> Main menu</button>
+        <div><span>CHAPTER ONE</span><h1>World Map · Chapter One</h1></div>
+        <button className="world-chapter-progress-toggle" onClick={() => setProgressOpen(true)}>Your progress</button>
+      </header>
+      <main className="world-chapter-list" aria-label="World Map scenes">
+        {chapterScenes.map((scene, index) => {
+          const score = sceneQuizScore(scene.words);
+          return <button key={scene.title} className={`world-chapter-row ${scene.available ? "" : "is-locked"}`} style={{ backgroundImage: `linear-gradient(90deg, rgba(6, 44, 43, .9), rgba(6, 44, 43, .58)), url('${assetUrl(scene.image)}')` }} onClick={() => scene.available ? scene.open() : window.alert("Complete the previous scene to unlock this one.")}><b className="world-chapter-number">{index + 1}</b><span className="world-chapter-copy"><strong>{scene.title}</strong><small>{scene.note}</small><em>{score.percent}% correct · {score.attempts ? `${score.attempts} recent attempt${score.attempts === 1 ? "" : "s"}` : "not tested"}</em></span><i className={scene.complete ? "is-complete" : ""}>{scene.complete ? <Check size={16} /> : ""}</i></button>;
+        })}
+      </main>
+      {progressOpen && <aside className="world-progress-drawer" aria-label="World Map quiz history"><button className="world-progress-close" onClick={() => setProgressOpen(false)} aria-label="Close progress"><X size={17} /></button><p>Your progress</p><span>Last five quiz attempts in each scene</span><div>{chapterScenes.map((scene) => { const score = sceneQuizScore(scene.words); return <article key={scene.title}><img src={assetUrl(scene.image)} alt="" /><section><strong>{scene.title}</strong><small>{score.percent}% · {score.attempts ? `${score.attempts}/5 attempts` : "not tested"}</small></section></article>; })}</div></aside>}
+    </div>
+  );
   const point = (
     label: string,
     position: React.CSSProperties,
@@ -1465,30 +2306,67 @@ function WorldMapSection({
     locked = false,
   ) => {
     if (label === "Detective Mason" && mapPage === "elderwoods") return null;
+    const sceneStartImages: Record<string, string> = {
+      "Scene One": assetUrl("a1.png"),
+      "Ice Cream Shop": assetUrl("scenes/bella/b1-woman-no-boards-v2.png"),
+      "Shopping Centre": assetUrl("scenes/shop/c1-v3.png"),
+      "Bus Stop Quiz": assetUrl("scenes/bus/d1.png"),
+      "Returning Home": assetUrl("scenes/home/return-home-e1.webp"),
+      "Detective Mason": assetUrl("scenes/cop/i1.png"),
+      "Sports Day": assetUrl("scenes/sports-day/g1.png"),
+      "Night Music": assetUrl("scenes/music/1a.png"),
+      "The Masked Baron": assetUrl("scenes/masked-baron/1a.png"),
+    };
+    const startImage = sceneStartImages[label];
+    const sceneAmbience: Partial<Record<string, { file: string; volume: number }>> = {
+      "Bus Stop Quiz": { file: "audio/bus-stop-engine.mp3", volume: 0.23 },
+      "Sports Day": { file: "audio/sports-day-soft-crowd.mp3", volume: 0.192 },
+    };
     const exactBounds: Record<string, React.CSSProperties> = {
-      "The Corner House": { left: "33.7%", top: "63.9%", transform: "none" },
+      "Returning Home": { left: "33.7%", top: "63.9%", transform: "none" },
     };
     return (
       <>
         <button
           key={`${mapPage}-${label}`}
-          className={`map-memory-point ${label === "Bus stop quiz" ? "bus-stop-star" : ""} ${locked ? "opacity-50" : ""}`}
+          className={`map-memory-point ${label === "Bus Stop Quiz" || label === "Night Music" ? "bus-stop-star" : ""} ${label === "The Masked Baron" ? "masked-barron-point" : ""} ${locked ? "opacity-50" : ""}`}
           style={exactBounds[label] ?? position}
-          onClick={() =>
-            locked ? window.alert("You need a ★ star to continue.") : onClick()
-          }
+          onPointerEnter={() => { if (!locked && startImage) void preloadImage(startImage, "low"); }}
+          onClick={() => {
+            if (locked) {
+              window.alert(label === "The Masked Baron"
+                ? `Unlock ${maskedBaronWordRequirement} words to enter The Masked Baron. You currently have ${collectionWords.length}.`
+                : "You need a ★ star to continue.");
+              return;
+            }
+            const ambience = sceneAmbience[label];
+            if (ambience) primeSceneAmbience(ambience.file, ambience.volume);
+            onClick();
+          }}
           aria-label={label === "★" ? "Bus stop test" : label}
         >
           <span className="hotspot-pulse" />
           <span className="map-memory-badge">{badge}</span>
           <span className="hotspot-tooltip">
-            {locked ? "You need a ★ star to continue." : label === "★" ? "Bus stop test" : label}
+            {locked
+              ? label === "The Masked Baron"
+                ? `Unlock ${maskedBaronWordRequirement} words to enter · ${collectionWords.length}/${maskedBaronWordRequirement}`
+                : "You need a ★ star to continue."
+              : label === "Bus Stop Quiz" && busScore !== null
+                ? `Bus Stop Quiz · ${busScore}% · Click to retake`
+                : label === "Night Music" && musicScore !== null
+                  ? `Night Music Quiz · ${musicScore}% · Click to retake`
+                  : label === "Night Music"
+                    ? "Night Music Quiz"
+                    : label === "★"
+                      ? "Bus Stop Quiz"
+                      : label}
           </span>
         </button>
         {label === "Sports Day" && soccerComplete && (
           <button
             className="world-map-page-arrow world-map-page-arrow-gold world-map-page-arrow-west"
-            onClick={() => setMapPage("town-centre")}
+            onClick={() => switchMapPage("town-centre")}
             aria-label="Open the town-centre map"
           >
             <ChevronLeft />
@@ -1504,36 +2382,26 @@ function WorldMapSection({
   });
   if (mapPage === "town-centre")
     return (
-      <div className="world-map-scene">
-        <img
+      <div className={`world-map-scene ${mapSwitching ? "world-map-is-switching" : ""}`}>
+        <SmoothSceneImage
           className="world-map-image"
           src={TOWN_CENTRE_MAP_IMG}
           alt="Town centre map"
+          onDisplayed={(src) => { if (src === TOWN_CENTRE_MAP_IMG) setMapSwitching(false); }}
         />
         <div className="world-map-vignette" />
         <header className="world-map-topbar">
           <div>
             <h1>TaleTalk</h1>
             <span>THE WORLD MAP · CHAPTER II</span>
-            <small className="world-map-time">8:39 PM</small>
+            <small className="world-map-time">{mapTime}</small>
           </div>
-          <div className="flex gap-2">
-            <button
-              className="world-map-menu"
-              onClick={onToggleSound}
-              aria-label={soundMuted ? "Turn sound on" : "Mute sound"}
-            >
-              {soundMuted ? <Volume2 size={15} /> : <VolumeX size={15} />}{" "}
-              {soundActionLabel}
-            </button>
-            <button className="world-map-menu" onClick={onMenu}>
-              Menu
-            </button>
-          </div>
+          {worldMapSettings}
         </header>
+        {collectionButton}
         <button
           className="world-map-page-arrow world-map-page-arrow-west"
-          onClick={() => setMapPage("elderwoods")}
+          onClick={() => switchMapPage("elderwoods")}
           aria-label="Return to Elderwoods"
         >
           <ChevronRight />
@@ -1542,19 +2410,22 @@ function WorldMapSection({
           "Detective Mason",
           position(48.5, 65.5),
           onOpenCop,
-          savedCopComplete ? "4/4" : "0/4",
+          sceneProgressBadge("cop", savedCopComplete),
         )}
-        <footer className="world-map-footer">
-          <span>{progress} / 7 story milestones unlocked</span>
-        </footer>
+        {savedCopComplete && point("Night Music", position(68, 34), onOpenMusic, "★")}
+        {musicComplete && point("The Masked Baron", position(50.4, 21.6), onOpenBaron, sceneProgressBadge("masked-baron", maskedBaronComplete), !maskedBaronUnlocked)}
+        {collectionPanel}
+        {endSceneSummary && <EndSceneSummaryCard summary={endSceneSummary} onClose={onDismissEndSceneSummary} />}
+        {endQuizSummary && <EndQuizSummaryCard summary={endQuizSummary} onClose={onDismissEndQuizSummary} />}
       </div>
     );
   return (
-    <div className="world-map-scene">
-      <img
+    <div className={`world-map-scene ${mapSwitching ? "world-map-is-switching" : ""}`}>
+      <SmoothSceneImage
         className="world-map-image"
         src={elderwoodsMapImage}
         alt="The world map"
+        onDisplayed={(src) => { if (src === elderwoodsMapImage) setMapSwitching(false); }}
       />
       <div className="world-map-vignette" />
       <header className="world-map-topbar">
@@ -1563,60 +2434,48 @@ function WorldMapSection({
           <span>THE WORLD MAP · CHAPTER I</span>
           <small className="world-map-time">{mapTime}</small>
         </div>
-        <div className="flex gap-2">
-          <button
-            className="world-map-menu"
-            onClick={onToggleSound}
-            aria-label={soundMuted ? "Turn sound on" : "Mute sound"}
-          >
-            {soundMuted ? <Volume2 size={15} /> : <VolumeX size={15} />}{" "}
-            {soundActionLabel}
-          </button>
-          <button className="world-map-menu" onClick={onMenu}>
-            Menu
-          </button>
-        </div>
+        {worldMapSettings}
       </header>
-      {!shopMemoryComplete && (
+      {!bellaMemoryComplete ? (
         <div className="world-map-intro world-map-intro-sm">
           <div className="eyebrow">Chapter I · Elderwoods</div>
           <h2>Welcome to Elderwoods</h2>
           <p>Explore, learn new words, and open each story in order.</p>
         </div>
-      )}
+      ) : collectionButton}
       {point(
-        "Scene one",
+        "Scene One",
         position(41.9, 56.8),
         onOpenMemory,
-        bellaMemoryComplete ? "2/2" : "0/2",
+        sceneProgressBadge("backyard", bellaMemoryComplete),
       )}
       {bellaMemoryComplete &&
         point(
-          "Ice cream shop",
+          "Ice Cream Shop",
           position(42, 42.8),
           onOpenShop,
-          shopMemoryComplete ? "4/4" : "0/4",
+          sceneProgressBadge("icecream", shopMemoryComplete),
         )}
       {shopMemoryComplete &&
         point(
-          "Shopping centre",
+          "Shopping Centre",
           position(72.4, 57.7),
           onOpenMarket,
-          marketComplete ? "4/4" : "0/4",
+          sceneProgressBadge("shopping", marketComplete),
         )}
       {marketComplete &&
         point(
-          "Bus stop quiz",
+          "Bus Stop Quiz",
           position(44.4, 25.5),
           onOpenBus,
           "\u2605",
         )}
       {shopMemoryComplete &&
         point(
-          "The Corner House",
+          "Returning Home",
           { left: "41.7%", top: "34.3%" },
           onOpenHome,
-          homeComplete ? "4/4" : "0/4",
+          sceneProgressBadge("home", homeComplete),
           !busComplete,
         )}
       {homeComplete &&
@@ -1624,23 +2483,23 @@ function WorldMapSection({
           "Detective Mason",
           position(46.1, 29.6),
           onOpenCop,
-          copComplete ? "4/4" : "0/4",
+          sceneProgressBadge("cop", savedCopComplete),
         )}
       {copComplete &&
         point(
           "Sports Day",
           position(60.1, 82.6),
           onOpenSoccer,
-          soccerComplete ? "4/4" : "0/4",
+          sceneProgressBadge("sports", soccerComplete),
         )}
-      <footer className="world-map-footer">
-        <span>{progress} / 7 story milestones unlocked</span>
-      </footer>
+      {collectionPanel}
+      {endSceneSummary && <EndSceneSummaryCard summary={endSceneSummary} onClose={onDismissEndSceneSummary} />}
+      {endQuizSummary && <EndQuizSummaryCard summary={endQuizSummary} onClose={onDismissEndQuizSummary} />}
     </div>
   );
   return (
     <div className="world-map-scene">
-      <img
+      <SmoothSceneImage
         className="world-map-image"
         src={WORLD_MAP_IMG}
         alt="The world map"
@@ -1672,45 +2531,42 @@ function WorldMapSection({
         <p>Explore, learn new words, and open each story in order.</p>
       </div>
       {point(
-        "Scene one",
+        "Scene One",
         position(41.9, 56.8),
         onOpenMemory,
-        bellaMemoryComplete ? "2/2" : "0/2",
+        sceneProgressBadge("backyard", bellaMemoryComplete),
         marketComplete && !busComplete,
       )}
       {bellaMemoryComplete &&
         point(
-          "Ice cream shop",
+          "Ice Cream Shop",
           position(42, 42.8),
           onOpenShop,
-          shopMemoryComplete ? "complete" : "1/4",
+          sceneProgressBadge("icecream", shopMemoryComplete),
         )}
       {shopMemoryComplete &&
         !marketComplete &&
-        point("Shopping centre", position(70.9, 54.5), onOpenMarket, "0/4")}
+        point("Shopping Centre", position(70.9, 54.5), onOpenMarket, sceneProgressBadge("shopping", marketComplete))}
       {point(
-        "Bus stop quiz",
+        "Bus Stop Quiz",
         { left: "46.3%", top: "38.6%" },
         onOpenBus,
         "\u2605",
       )}
       {busComplete &&
         point(
-          "The Corner House",
+          "Returning Home",
           { left: "41.7%", top: "34.3%" },
           onOpenHome,
-          homeComplete ? "done" : "new",
+          sceneProgressBadge("home", homeComplete),
         )}
       {homeComplete &&
         point(
           "Sports Day",
           { left: "50.6%", top: "33.4%" },
           onOpenSoccer,
-          soccerComplete ? "done" : "new",
+          sceneProgressBadge("sports", soccerComplete),
         )}
-      <footer className="world-map-footer">
-        <span>{progress} / 4 story milestones unlocked</span>
-      </footer>
     </div>
   );
 }
@@ -1812,6 +2668,8 @@ function LegacyWorldMapSection({
     );
     localStorage.removeItem(`taletalk-save-slot-${creatingSlot}`);
     nameSlot(creatingSlot, fileName.trim(), avatar);
+    localStorage.setItem("taletalk-romanisation-enabled", "true");
+    window.dispatchEvent(new CustomEvent("taletalk-romanisation-change", { detail: true }));
     onSelectSaveSlot(creatingSlot);
     setSaveSlots(listSlots());
     setCreatingSlot(null);
@@ -1961,7 +2819,7 @@ function LegacyWorldMapSection({
         }
       }}
     >
-      <img
+      <SmoothSceneImage
         className="world-map-image"
         src={WORLD_MAP_IMG}
         alt="The world map"
@@ -2088,9 +2946,7 @@ function LegacyWorldMapSection({
               : "0/4"}
         </span>
         {hovered && (
-          <span className="hotspot-tooltip">
-            {isChinese ? "第一段记忆" : "The first memory"}
-          </span>
+          <span className="hotspot-tooltip">The first memory</span>
         )}
       </button>
 
@@ -2113,9 +2969,7 @@ function LegacyWorldMapSection({
             {shopMemoryComplete ? "4/4" : "0/4"}
           </span>
           {hoveredShop && (
-            <span className="hotspot-tooltip">
-              {isChinese ? "冰淇淋记忆" : "The ice cream memory"}
-            </span>
+            <span className="hotspot-tooltip">The ice cream memory</span>
           )}
         </button>
       )}
@@ -2141,7 +2995,7 @@ function LegacyWorldMapSection({
         >
           <span className="hotspot-pulse" />
           <span className="map-memory-badge">{homeComplete ? "★" : "★"}</span>
-          <span className="hotspot-tooltip">The Corner House</span>
+          <span className="hotspot-tooltip">Returning Home</span>
         </button>
       )}
       {homeComplete && (
@@ -2183,9 +3037,7 @@ function LegacyWorldMapSection({
           <span className="hotspot-pulse" />
           <span className="map-memory-badge">0/1</span>
           {hoveredMarket && (
-            <span className="hotspot-tooltip">
-              {isChinese ? "去商店的旅行" : "A trip to the shop"}
-            </span>
+            <span className="hotspot-tooltip">A trip to the shop</span>
           )}
         </button>
       )}
@@ -2231,48 +3083,54 @@ const SHOP_CHOICES: Array<{
 }> = [
   {
     id: "gelato",
-    italianLabel: "One ice cream please",
-    englishLabel: "一个冰淇淋，谢谢",
-    prompt: "one ice cream please",
+    italianLabel: "Ice cream please",
+    englishLabel: "Ice cream, please.",
+    prompt: "ice cream please",
     correct: true,
     responseIt: "",
     responseEn: "",
-    wordTooltips: [{ word: "One ice cream please", translation: "一个冰淇淋，谢谢" }],
-  },
-  {
-    id: "pizza",
-    italianLabel: "One pizza please",
-    englishLabel: "我想要一个披萨，谢谢。",
-    prompt: "one pizza please",
-    correct: false,
-    responseIt: "We do not have pizza.",
-    responseEn: "我们没有披萨。",
-    wordTooltips: [
-      { word: "one pizza", translation: "一份披萨" },
-      { word: "please", translation: "请" },
-    ],
-  },
-  {
-    id: "acqua",
-    italianLabel: "One water please",
-    englishLabel: "我想要一些水，谢谢。",
-    prompt: "one water please",
-    correct: false,
-    responseIt: "Questa è una gelateria!",
-    responseEn: "This is an ice cream shop!",
-    wordTooltips: [
-      { word: "one water", translation: "一瓶水" },
-      { word: "please", translation: "请" },
-    ],
+    wordTooltips: [{ word: "Ice cream please", translation: "Ice cream, please." }],
   },
 ];
 
 const GRAZIE_WORDS: ShopWordTooltip[] = [
-  { word: "Thank you", translation: "谢谢" },
+  { word: "Thank you", translation: "Thank you" },
 ];
 const PREGO_WORDS: ShopWordTooltip[] = [
-  { word: "You are welcome", translation: "不客气" },
+  { word: "You are welcome", translation: "You are welcome" },
 ];
+
+// This adventure teaches Korean: the word to type is Korean and the meaning
+// underneath is English. The legacy data retains its old keys for saves.
+const SHOP_KOREAN: Record<string, string> = {
+  "Ice cream please": "아이스크림 주세요",
+  "ice cream please": "아이스크림 주세요",
+  "one pizza": "피자 하나",
+  "one water": "물 하나",
+  please: "주세요",
+  "Thank you": "감사합니다",
+  "You are welcome": "천만에요",
+};
+const SHOP_ENGLISH: Record<string, string> = {
+  "Ice cream please": "Ice cream, please.",
+  "ice cream please": "Ice cream, please.",
+  "one pizza": "One pizza",
+  "one water": "One water",
+  please: "please",
+  "Thank you": "Thank you",
+  "You are welcome": "You are welcome",
+};
+const SHOP_ROMANISATION: Record<string, string> = {
+  "아이스크림 주세요": "aiseukeurim juseyo",
+  "피자 하나": "pija hana",
+  "물 하나": "mul hana",
+  "주세요": "juseyo",
+  "감사합니다": "gamsahamnida",
+  "천만에요": "cheonmaneyo",
+};
+const shopKorean = (word: string) => SHOP_KOREAN[word] ?? word;
+const shopEnglish = (word: string, fallback: string) => SHOP_ENGLISH[word] ?? fallback;
+const shopRomanisation = (word: string) => SHOP_ROMANISATION[shopKorean(word)] ?? "";
 
 function matchShopChoiceInput(
   raw: string,
@@ -2291,7 +3149,9 @@ function matchShopChoiceInput(
   if (!normalized) return null;
 
   const exact = SHOP_CHOICES.find(
-    (choice) => stripAccents(choice.prompt) === normalized,
+    (choice) => stripAccents(shopKorean(choice.prompt)) === normalized
+      || stripAccents(choice.prompt) === normalized
+      || localStorage.getItem("taletalk-romanisation-enabled") === "true" && stripAccents(shopRomanisation(choice.prompt)) === normalized,
   );
   if (exact) return exact;
 
@@ -2342,6 +3202,15 @@ type ShopPhase =
   | "wife-warning"
   | "wife-hangup";
 
+const BELLA_SHOP_IMAGES = [
+  "scenes/bella/b1-woman-no-boards-v2.png",
+  "scenes/bella/b2-no-boards-v2.png",
+  "scenes/bella/b3-no-boards-v2.png",
+  "scenes/bella/b4-no-boards-v2.png",
+  "scenes/bella/b5-no-boards-v2.png",
+  "scenes/bella/b6-no-boards-v2.png",
+].map(assetUrl);
+
 function BellaShopAdventure({
   onMenu,
   onComplete,
@@ -2349,6 +3218,8 @@ function BellaShopAdventure({
   onMenu: () => void;
   onComplete: () => void;
 }) {
+  // This scene now uses English interface text with Korean learning prompts.
+  const isChinese = false;
   const overlay = useDebugOverlay();
   const { debugMode, sceneRef, handleSceneMouseMove } = overlay;
   const [phase, setPhase] = useState<ShopPhase>("intro");
@@ -2361,6 +3232,7 @@ function BellaShopAdventure({
   const [pregoInput, setPregoInput] = useState("");
   const [pregoWrong, setPregoWrong] = useState(false);
   const [pregoDone, setPregoDone] = useState(false);
+  const [shopRomanisationEnabled, setShopRomanisationEnabled] = useState(() => localStorage.getItem("taletalk-romanisation-enabled") === "true");
   const [chosenOrder, setChosenOrder] = useState<
     (typeof SHOP_CHOICES)[number] | null
   >(null);
@@ -2383,6 +3255,16 @@ function BellaShopAdventure({
     toggle: toggleSpeech,
   } = useSpeech();
   useEffect(() => {
+    if (shopPracticeWord) speak(shopKorean(shopPracticeWord.word), "female");
+  }, [shopPracticeWord, speak]);
+  const toggleShopRomanisation = () => {
+    const next = !shopRomanisationEnabled;
+    setShopRomanisationEnabled(next);
+    localStorage.setItem("taletalk-romanisation-enabled", String(next));
+    window.dispatchEvent(new CustomEvent("taletalk-romanisation-change", { detail: next }));
+  };
+  useEffect(() => { const sync = (event: Event) => setShopRomanisationEnabled(Boolean((event as CustomEvent<boolean>).detail)); window.addEventListener("taletalk-romanisation-change", sync); return () => window.removeEventListener("taletalk-romanisation-change", sync); }, []);
+  useEffect(() => {
     if (!shopUnlockedWords.length) return;
     const slot = Number(localStorage.getItem("taletalk_active_save_slot") ?? "1");
     const key = `taletalk-slot-${slot}-scene-icecream-words`;
@@ -2393,6 +3275,7 @@ function BellaShopAdventure({
     const mapWords = new Set<string>(JSON.parse(localStorage.getItem(mapKey) ?? "[]"));
     shopUnlockedWords.forEach(word => mapWords.add(word.word.toLowerCase()));
     localStorage.setItem(mapKey, JSON.stringify([...mapWords].sort()));
+    recordDailyLearnedWords(shopUnlockedWords.map(word => word.word), slot);
     window.dispatchEvent(new Event("taletalk-words-changed"));
   }, [shopUnlockedWords]);
   useEffect(() => {
@@ -2445,29 +3328,7 @@ function BellaShopAdventure({
       void context?.close();
     };
   }, [phase]);
-  const recordDailyWords = (words: string[]) => {
-    const slot = Number(localStorage.getItem("taletalk_active_save_slot") ?? "1");
-    const day = new Date().toISOString().slice(0, 10);
-    const seenKey = `taletalk-slot-${slot}-daily-word-list-${day}`;
-    const seen = new Set<string>(JSON.parse(localStorage.getItem(seenKey) ?? "[]"));
-    const before = seen.size;
-    words.forEach((word) => seen.add(word.toLowerCase()));
-    if (seen.size === before) return;
-    localStorage.setItem(seenKey, JSON.stringify([...seen]));
-    localStorage.setItem(`taletalk-slot-${slot}-daily-words-${day}`, String(seen.size));
-    const goal = Number(localStorage.getItem(`taletalk-slot-${slot}-daily-word-goal`) ?? 5);
-    const completeKey = `taletalk-slot-${slot}-daily-goal-completed-${day}`;
-    if (seen.size >= goal && localStorage.getItem(completeKey) !== "true") {
-      localStorage.setItem(completeKey, "true");
-      const lastDayKey = `taletalk-slot-${slot}-daily-word-last-complete`;
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const nextStreak = localStorage.getItem(lastDayKey) === yesterday
-        ? Number(localStorage.getItem(`taletalk-slot-${slot}-daily-word-streak`) ?? 0) + 1
-        : 1;
-      localStorage.setItem(`taletalk-slot-${slot}-daily-word-streak`, String(nextStreak));
-      localStorage.setItem(lastDayKey, day);
-    }
-  };
+  const recordDailyWords = (words: string[]) => recordDailyLearnedWords(words);
   const playShopDoorBell = () => {
     try {
       const context = new AudioContext();
@@ -2486,7 +3347,6 @@ function BellaShopAdventure({
       void context.resume().catch(() => undefined);
     } catch { /* Audio is optional when a browser blocks it. */ }
   };
-  const { isChinese } = useLanguage();
   const keyBufferRef = useRef("");
   const marketAmbienceRef = useRef<HTMLAudioElement>(null);
 
@@ -2503,67 +3363,17 @@ function BellaShopAdventure({
   }, []);
 
   const sceneDialogue = (currentPhase: ShopPhase) => {
-    const lines: Partial<Record<ShopPhase, { en: string; zh: string }>> = {
-      intro: {
-        en: "At long last he makes it to the ice cream shop. Bella is bursting with excitement.",
-        zh: "终于，他来到了冰淇淋店。贝拉兴奋极了。",
-      },
-      "bella-excited": { en: "Delicious!", zh: "Delicious!" },
-      counter: {
-        en: "He then moves up to the counter to order.",
-        zh: "随后，他走到柜台前点单。",
-      },
-      ending: {
-        en: "Bella is happy. He made her day.",
-        zh: "贝拉很开心。他让她度过了快乐的一天。",
-      },
-      "phone-call": {
-        en: "And just at that moment he gets a call from his wonderful wife.",
-        zh: "就在这时，他接到了妻子的电话。",
-      },
-      "wife-angry": { en: "!!!!!", zh: "!!!!!" },
-      "wife-warning": {
-        en: "His wife reminds him that he has not helped with the shopping he promised to do. She tells him: either come home with the shopping done, or do not come home at all! She also reminds him that she loves him.",
-        zh: "妻子提醒他：他还没有完成答应帮忙买的东西。她告诉他，要么买完东西回家，要么就别回家！她也提醒他，她爱他。",
-      },
-      "wife-hangup": { en: "And she hangs up.", zh: "然后，她挂断了电话。" },
-    };
-    // Keep Chinese narration as real Unicode text. The older imported strings
-    // were mojibake, which made some Chinese narrator beats silent.
-    const chineseNarration: Partial<Record<ShopPhase, string>> = {
-      intro: "终于，他来到了冰淇淋店。贝拉兴奋极了。",
-      counter: "随后，他走到柜台前点单。",
-      ending: "贝拉很开心。他让她度过了快乐的一天。",
-      "phone-call": "就在这时，他接到了妻子的电话。",
+    const lines: Partial<Record<ShopPhase, string>> = {
+      intro: "At long last he makes it to the ice cream shop. Bella is bursting with excitement.",
+      "bella-excited": "맛있어!",
+      counter: "He then moves up to the counter to order.",
+      ending: "Bella is happy. He made her day.",
+      "phone-call": "And just at that moment he gets a call from his wonderful wife.",
       "wife-angry": "!!!!!",
-      "wife-warning":
-        "妻子提醒他：他还没有完成答应帮忙买的东西。她告诉他，要么买完东西回家，要么就别回家！她也提醒他，她爱他。",
-      "wife-hangup": "然后，她挂断了电话。",
+      "wife-warning": "His wife reminds him that he has not helped with the shopping he promised to do. She tells him: either come home with the shopping done, or do not come home at all! She also reminds him that she loves him.",
+      "wife-hangup": "And she hangs up.",
     };
-    const line = lines[currentPhase];
-    const cleanChineseNarration: Partial<Record<ShopPhase, string>> = {
-      intro:
-        "\u7ec8\u4e8e\uff0c\u4ed6\u6765\u5230\u4e86\u51b0\u6dc7\u6dcb\u5e97\u3002\u8d1d\u62c9\u5174\u594b\u6781\u4e86\u3002",
-      counter:
-        "\u968f\u540e\uff0c\u4ed6\u8d70\u5230\u67dc\u53f0\u524d\u70b9\u5355\u3002",
-      ending:
-        "\u8d1d\u62c9\u5f88\u5f00\u5fc3\u3002\u4ed6\u8ba9\u5979\u5ea6\u8fc7\u4e86\u5feb\u4e50\u7684\u4e00\u5929\u3002",
-      "phone-call":
-        "\u5c31\u5728\u8fd9\u65f6\uff0c\u4ed6\u63a5\u5230\u4e86\u59bb\u5b50\u7684\u7535\u8bdd\u3002",
-      "wife-angry": "!!!!!",
-      "wife-warning":
-        "\u59bb\u5b50\u63d0\u9192\u4ed6\uff1a\u4ed6\u8fd8\u6ca1\u6709\u5b8c\u6210\u7b54\u5e94\u5e2e\u5fd9\u4e70\u7684\u4e1c\u897f\u3002\u5979\u544a\u8bc9\u4ed6\uff0c\u8981\u4e48\u4e70\u5b8c\u4e1c\u897f\u56de\u5bb6\uff0c\u8981\u4e48\u5c31\u522b\u56de\u5bb6\uff01\u5979\u4e5f\u63d0\u9192\u4ed6\uff0c\u5979\u7231\u4ed6\u3002",
-      "wife-hangup":
-        "\u7136\u540e\uff0c\u5979\u6302\u65ad\u4e86\u7535\u8bdd\u3002",
-    };
-    const characterDialogue = currentPhase === "bella-excited";
-    return line
-      ? characterDialogue
-        ? line.en
-        : isChinese
-          ? (cleanChineseNarration[currentPhase] ?? line.zh)
-          : line.en
-      : "";
+    return lines[currentPhase] ?? "";
   };
 
   useEffect(() => {
@@ -2583,31 +3393,14 @@ function BellaShopAdventure({
 
   useEffect(() => {
     if (phase === "wife-angry") return;
-    if (phase === "grazie") speak(isChinese ? "谢谢！" : "Thank you!", "bella");
-    else if (phase === "prego")
-      speak(isChinese ? "不客气！" : "You are welcome!", "shopkeeper");
-    else {
-      const dialogue = sceneDialogue(phase);
-      if (dialogue)
-        speak(
-          dialogue,
-          phase === "bella-excited"
-            ? "bella"
-            : phase === "wife-angry"
-              ? "wife"
-              : "josh",
-        );
-    }
+    if (phase === "grazie") { speak("감사합니다", "bella"); return; }
+    if (phase === "prego") { speak("천만에요", "shopkeeper"); return; }
+    if (phase === "order") { speak(shopKorean(SHOP_CHOICES.find(choice => choice.correct)?.prompt ?? ""), "josh"); return; }
+    const dialogue = sceneDialogue(phase);
+    if (dialogue) speak(dialogue, phase === "bella-excited" ? "bella" : "male");
   }, [phase, isChinese, speak]);
 
-  const images = [
-    "scenes/bella/b1-woman-no-boards-v2.png",
-    "scenes/bella/b2-no-boards-v2.png",
-    "scenes/bella/b3-no-boards-v2.png",
-    "scenes/bella/b4-no-boards-v2.png",
-    "scenes/bella/b5-no-boards-v2.png",
-    "scenes/bella/b6-no-boards-v2.png",
-  ].map(assetUrl);
+  const images = BELLA_SHOP_IMAGES;
   const image =
     phase === "intro" || phase === "bella-excited"
       ? images[0]
@@ -2622,6 +3415,9 @@ function BellaShopAdventure({
               : phase === "wife-angry"
                 ? images[4]
                 : images[5];
+  useEffect(() => {
+    preloadSceneWindow(images, Math.max(0, images.indexOf(image)), 12);
+  }, [image]);
 
   const advance = () => {
     if (phase === "intro") setPhase("bella-excited");
@@ -2663,8 +3459,10 @@ function BellaShopAdventure({
   }, [phase, canClick]);
 
   const getWordMatchState = (choice: (typeof SHOP_CHOICES)[number]) => {
+    const typingRomanisation = shopRomanisationEnabled && /[a-z]/i.test(orderInput);
+    const targets = choice.wordTooltips.map((word) => typingRomanisation ? shopRomanisation(word.word) : shopKorean(word.word));
     const flatString = choice.wordTooltips
-      .map((w) => stripAccents(w.word.toLowerCase()))
+      .map((word, index) => stripAccents((targets[index] || word.word).toLowerCase()))
       .join(" ");
     const typedFlat = stripAccents(
       orderInput.toLowerCase().replace(/\s+/g, " ").trim(),
@@ -2675,8 +3473,8 @@ function BellaShopAdventure({
       else break;
     }
     let charOffset = 0;
-    const wordStates = choice.wordTooltips.map((w) => {
-      const word = stripAccents(w.word.toLowerCase());
+    const wordStates = choice.wordTooltips.map((w, index) => {
+      const word = stripAccents((targets[index] || shopKorean(w.word)).toLowerCase());
       const wordStart = charOffset;
       const wordEnd = charOffset + word.length;
       const matchedInWord = Math.max(
@@ -2689,6 +3487,7 @@ function BellaShopAdventure({
         matchedLetters: matchedInWord,
         totalLetters: word.length,
         isComplete,
+        typedPart: typedFlat.slice(wordStart, Math.min(wordEnd, typedFlat.length)),
       };
     });
     const isFullMatch = wordStates.every((ws) => ws.isComplete);
@@ -2706,8 +3505,12 @@ function BellaShopAdventure({
         setOrderWrong(false);
         setOrderTypingWrong(false);
         setChosenOrder(match);
+        setShopUnlockedWords(previous => {
+          const existing = new Set(previous.map(word => word.word));
+          return [...previous, ...[...match.wordTooltips, { word: "please", translation: "Please give me" }].filter(word => !existing.has(word.word))];
+        });
         setPhase("order-speaking");
-        speak(isChinese ? match.englishLabel : match.prompt, "male", () =>
+        speak(shopKorean(match.prompt), "josh", () =>
           setTimeout(() => setPhase("grazie"), 3500),
         );
       } else {
@@ -2722,8 +3525,9 @@ function BellaShopAdventure({
   };
 
   const getSimpleMatchState = (input: string, words: ShopWordTooltip[]) => {
+    const typingRomanisation = shopRomanisationEnabled && /[a-z]/i.test(input);
     const flatString = words
-      .map((w) => stripAccents(w.word.toLowerCase()))
+      .map((w) => stripAccents((typingRomanisation ? shopRomanisation(w.word) : shopKorean(w.word)).toLowerCase()))
       .join(" ");
     const typedFlat = stripAccents(
       input.toLowerCase().replace(/\s+/g, " ").trim(),
@@ -2735,7 +3539,7 @@ function BellaShopAdventure({
     }
     let charOffset = 0;
     const wordStates = words.map((w) => {
-      const word = stripAccents(w.word.toLowerCase());
+      const word = stripAccents((typingRomanisation ? shopRomanisation(w.word) : shopKorean(w.word)).toLowerCase());
       const wordStart = charOffset;
       const wordEnd = charOffset + word.length;
       const matchedInWord = Math.max(
@@ -2754,16 +3558,18 @@ function BellaShopAdventure({
   };
 
   const handleGrazieSubmit = () => {
+    const answer = stripAccents(grazieInput.toLowerCase().trim());
     if (
       isSkipAnswer(grazieInput) ||
-      stripAccents(grazieInput.toLowerCase().trim()) === "thank you"
+      answer === shopKorean("Thank you") ||
+      answer === shopRomanisation("Thank you")
     ) {
       setGrazieDone(true);
       setShopUnlockedWords((prev) => {
         const existing = new Set(prev.map((w) => w.word));
         return [...prev, ...GRAZIE_WORDS.filter((w) => !existing.has(w.word))];
       });
-      speak("Thank you", "bella");
+      speak(shopKorean("Thank you"), "bella");
       setGrazieInput("");
       setTimeout(() => {
         setGrazieDone(false);
@@ -2776,16 +3582,18 @@ function BellaShopAdventure({
   };
 
   const handlePregoSubmit = () => {
+    const answer = stripAccents(pregoInput.toLowerCase().trim());
     if (
       isSkipAnswer(pregoInput) ||
-      stripAccents(pregoInput.toLowerCase().trim()) === "you are welcome"
+      answer === shopKorean("You are welcome") ||
+      answer === shopRomanisation("You are welcome")
     ) {
       setPregoDone(true);
       setShopUnlockedWords((prev) => {
         const existing = new Set(prev.map((w) => w.word));
         return [...prev, ...PREGO_WORDS.filter((w) => !existing.has(w.word))];
       });
-      speak("You are welcome", "shopkeeper");
+      speak(shopKorean("You are welcome"), "shopkeeper");
       setPregoInput("");
       setTimeout(() => {
         setPregoDone(false);
@@ -2799,17 +3607,7 @@ function BellaShopAdventure({
 
   const isGirl = phase === "bella-excited" || phase === "wife-angry";
   const dialogueText = sceneDialogue(phase);
-  const speakerName = isChinese
-    ? phase === "bella-excited"
-      ? "贝拉"
-      : phase === "wife-angry"
-        ? "妻子"
-        : "旁白"
-    : phase === "bella-excited"
-      ? "Bella"
-      : phase === "wife-angry"
-        ? "Wife"
-        : "Narrator";
+  const speakerName = phase === "bella-excited" ? "Bella" : phase === "wife-angry" ? "Wife" : "Narrator";
   const showDialogue = canClick;
 
   return (
@@ -2838,10 +3636,10 @@ function BellaShopAdventure({
               className="text-white text-lg font-bold"
               style={{ fontFamily: "'Playfair Display', serif" }}
             >
-              {isChinese ? "英语冒险" : "English Adventure"}
+              English Adventure
             </h1>
             <span className="text-white/70 text-[10px] uppercase tracking-[0.2em]">
-              {isChinese ? "冰淇淋店" : "The ice cream shop"}
+              The Ice Cream Shop
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -2859,12 +3657,12 @@ function BellaShopAdventure({
               }}
               className="px-4 py-2 rounded-full text-[11px] bg-black/60 border border-white/20 text-white/80 uppercase tracking-wider"
             >
-              {isChinese ? "菜单" : "Menu"}
+              Menu
             </button>
           </div>
         </header>
 
-        {shopUnlockedWords.length > 0 && (
+        {false && shopUnlockedWords.length > 0 && (
           <div
             className="absolute left-4 top-28 z-30"
             onClick={(e) => e.stopPropagation()}
@@ -2874,14 +3672,14 @@ function BellaShopAdventure({
               className="rounded-xl border border-[#c4942a]/50 bg-black/75 px-3 py-2 text-left text-white shadow-xl backdrop-blur-sm transition hover:bg-black/90"
             >
               <span className="mt-1 block text-[9px] uppercase tracking-wider text-white/60">
-                {isChinese ? "词汇" : "Words"}
+                Words
               </span>
             </button>
             {shopWordLibraryOpen && (
               <div className="mt-2 w-52 rounded-xl border border-white/15 bg-black/90 p-3 shadow-2xl">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-[#c4942a]">
-                    {isChinese ? "词汇表" : "Vocabulary"}
+                    Vocabulary
                   </span>
                   <button
                     className="text-white/50 hover:text-white"
@@ -2903,9 +3701,9 @@ function BellaShopAdventure({
                         }}
                         className="flex w-full items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-left transition hover:bg-white/10"
                       >
-                        <span className="text-sm text-white">{word.word}</span>
+                        <span className="text-sm text-white">{shopKorean(word.word)}</span>
                         <span className="text-[10px] text-white/45">
-                          {word.translation}
+                          {capitaliseStandalone(shopEnglish(word.word, word.translation))}
                         </span>
                       </button>
                     ))}
@@ -2921,7 +3719,8 @@ function BellaShopAdventure({
             onClick={() => setShopPracticeWord(null)}
           >
             <div
-              className="w-full max-w-sm rounded-2xl border border-white/15 bg-[#120d08]/95 p-5 shadow-2xl"
+              data-task-editor-panel="cafe-word-practice"
+              className="shop-task-box shared-task-bar-ui relative w-full max-w-[30rem] px-4 pb-3 pt-3"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="mb-1 text-[10px] uppercase tracking-wider text-[#c4942a]">
@@ -2931,23 +3730,25 @@ function BellaShopAdventure({
                 className="text-2xl text-white"
                 style={{ fontFamily: "'Playfair Display', serif" }}
               >
-                {shopPracticeWord.word}
+                <LiveAnswerLetters target={capitaliseStandalone(shopKorean(shopPracticeWord.word))} value={shopPracticeInput} neutralClassName="text-white" />
               </h2>
+              {shopRomanisationEnabled && <p className="mb-1 text-sm text-sky-200"><LiveAnswerLetters target={capitaliseStandalone(shopRomanisation(shopPracticeWord.word))} value={/[a-z]/i.test(shopPracticeInput) ? shopPracticeInput : ""} neutralClassName="text-sky-200" /></p>}
               <p className="mb-4 text-sm text-white/55">
-                {shopPracticeWord.translation}
+                {capitaliseStandalone(shopEnglish(shopPracticeWord.word, shopPracticeWord.translation))}
               </p>
               {shopPracticeCorrect ? (
                 <p className="mb-4 text-sm text-green-400">
                   Correct. The word is yours.
                 </p>
-              ) : (
+              ) : (<>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    setShopPracticeCorrect(
+                    const correct =
                       stripAccents(shopPracticeInput.trim().toLowerCase()) ===
-                        stripAccents(shopPracticeWord.word.toLowerCase()),
-                    );
+                        stripAccents(shopKorean(shopPracticeWord.word).toLowerCase());
+                    setShopPracticeCorrect(correct);
+                    if (correct) speak(shopKorean(shopPracticeWord.word), "female");
                   }}
                   className="flex gap-2"
                 >
@@ -2955,16 +3756,14 @@ function BellaShopAdventure({
                     autoFocus
                     value={shopPracticeInput}
                     onChange={(e) => setShopPracticeInput(e.target.value)}
-                    placeholder={
-                      isChinese ? "输入英语单词" : "type the English word"
-                    }
+                    placeholder="Type the Korean word or Romanisation"
                     className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-white/60"
                   />
                   <button className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs uppercase tracking-wider text-white">
                     Check
                   </button>
                 </form>
-              )}
+              </>)}
               <button
                 onClick={() => setShopPracticeWord(null)}
                 className="mt-4 text-xs text-white/50 hover:text-white"
@@ -2981,16 +3780,13 @@ function BellaShopAdventure({
 
         {showDialogue && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
-            onClick={(e) => e.stopPropagation()}
+            className="story-dialogue-panel absolute z-10 cursor-pointer"
+            onClick={(e) => { e.stopPropagation(); advance(); }}
           >
-            <div
-              className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
-            >
-              <div className="flex items-center gap-2.5 mb-2">
+            <div className="story-dialogue-content">
+              <div className="scene-eyebrow">
                 <div
-                  className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                  className="cop-narrator-dot"
                   style={{ background: isGirl ? "#e8a59c" : "#ccc" }}
                 />
                 <span
@@ -3000,40 +3796,14 @@ function BellaShopAdventure({
                 </span>
               </div>
               <p
-                className={`text-white ${isGirl ? "text-2xl" : "text-base"} leading-snug`}
-                style={{ fontFamily: "'Playfair Display', serif" }}
+                className="story-dialogue-text"
               >
                 {dialogueText}
               </p>
-              {phase === "bella-excited" && (
-                <p className="mt-1 text-sm text-white/60">太好吃了！</p>
-              )}
-              <div className="flex items-center justify-between mt-3">
-                {phase === "wife-hangup" ? (
-                  <button
-                    onClick={() => {
-                      cancel();
-                      onComplete();
-                    }}
-                    className="flex items-center gap-1.5 text-white/70 hover:text-white text-[11px] uppercase tracking-wider transition-colors"
-                  >
-                    {isChinese ? "返回地图" : "Return to map"}{" "}
-                    <ArrowRight size={12} />
-                  </button>
-                ) : phase === "ending" ? (
-                  <button
-                    onClick={() => advance()}
-                    className="flex items-center gap-1.5 text-white/70 hover:text-white text-[11px] uppercase tracking-wider transition-colors"
-                  >
-                    Continue <ArrowRight size={12} />
-                  </button>
-                ) : (
-                  <span className="text-white/40 text-[11px]">
-                    {isChinese
-                      ? "点击任意位置继续"
-                      : "click anywhere to continue"}
-                  </span>
-                )}
+              {phase === "bella-excited" && <p className="mt-1 text-sm text-white/60">Yum!</p>}
+              <div className="cop-narration-footer">
+                <span>{phase === "wife-hangup" ? "click anywhere to return to the map" : "click anywhere to continue"}</span>
+                <button onClick={(event) => { event.stopPropagation(); speak(dialogueText, isGirl ? "bella" : "male"); }}><Volume2 size={12} /> Listen</button>
               </div>
             </div>
           </div>
@@ -3041,22 +3811,20 @@ function BellaShopAdventure({
 
         {phase === "order" && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+            className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-10 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2"
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="relative rounded-2xl border border-white/10 px-3 pb-2 pt-2"
-              style={{ background: "rgba(0,0,0,0.92)" }}
+              data-task-editor-panel="cafe-order"
+              className="shop-task-box shared-task-bar-ui relative px-4 pb-3 pt-3"
             >
-              <button onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
-              <div className="flex items-center gap-2 mb-1">
+              <button data-task-editor-item="close" onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
+              <div data-task-editor-item="instruction" className="flex w-fit items-center gap-2 mb-1">
                 <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
                 <span
                   className={`text-[#c4942a] uppercase tracking-[0.12em] font-semibold ${isChinese ? "text-xs" : "text-[9px]"}`}
                 >
-                  {isChinese
-                    ? "店员：你好！请输入你想要的东西："
-                    : "Shopkeeper: Hello! Type what you would like:"}
+                  Shopkeeper: Hello! Type what you would like:
                 </span>
               </div>
               <div className="flex flex-col gap-1 mb-2">
@@ -3065,6 +3833,7 @@ function BellaShopAdventure({
                   return (
                     <div
                       key={c.id}
+                      data-task-editor-item={`choice-${c.id}`}
                       className={`px-3 py-1 rounded-lg bg-white/5 border transition-all ${isFullMatch ? "border-green-400/60 bg-green-400/10" : "border-white/15"}`}
                     >
                       <div className="flex items-center gap-2">
@@ -3073,18 +3842,18 @@ function BellaShopAdventure({
                         >
                           {SHOP_CHOICES.indexOf(c) + 1}
                         </span>
-                        <div className="flex flex-col">
-                          <span className="text-xs">
+                        <div className="flex min-w-0 flex-col gap-0.5">
+                          <span className="text-sm text-white/90">
                             {c.wordTooltips.map((wt, wi) => {
                               const ws = wordStates[wi];
-                              const letters = wt.word.split("");
+                              const letters = shopKorean(wt.word).split("");
                               return (
                                 <span key={wi}>
                                   <span className="underline decoration-dotted decoration-white/30 underline-offset-2">
                                     {letters.map((letter, li) => (
                                       <span
                                         key={li}
-                                        className={`transition-colors ${ws && li < ws.matchedLetters ? "text-green-400" : "text-white/90"}`}
+                                        className={`transition-colors ${!/[a-z]/i.test(orderInput) && ws && li < ws.matchedLetters ? "text-green-400" : "text-white/90"}`}
                                       >
                                         {letter}
                                       </span>
@@ -3097,13 +3866,18 @@ function BellaShopAdventure({
                               );
                             })}
                           </span>
-                          <span className="text-xs mt-1">
+                          {shopRomanisationEnabled && (
+                            <span className="text-[11px] text-sky-200">
+                              {c.wordTooltips.map((wt) => capitaliseStandalone(shopRomanisation(wt.word))).join(" ")}
+                            </span>
+                          )}
+                          <span className="text-xs text-white/55">
                             {c.wordTooltips.map((wt, ewi) => (
                               <span
                                 key={ewi}
-                                className={`transition-colors ${wordStates[ewi]?.isComplete ? "text-green-400" : "text-white/40"}`}
+                                className="text-white/55"
                               >
-                                {wt.translation}
+                                {capitaliseStandalone(shopEnglish(wt.word, wt.translation))}
                                 {ewi < c.wordTooltips.length - 1
                                   ? "\u00A0"
                                   : ""}
@@ -3117,8 +3891,9 @@ function BellaShopAdventure({
                 })}
               </div>
               <form
+                data-task-editor-item="answer-form"
                 onSubmit={handleOrderSubmit}
-                className="flex items-center gap-2"
+                className="flex w-full items-center gap-2"
               >
                 <input
                   value={orderInput}
@@ -3130,17 +3905,17 @@ function BellaShopAdventure({
                   className="flex-1 min-w-0 bg-white/5 text-white text-xs outline-none placeholder-white/30 caret-white border-b border-white/20 focus:border-white/60 py-1.5 rounded-lg px-2"
                 />
                 <button className="rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 hover:border-white/40 text-white text-xs px-4 py-2 transition-all uppercase tracking-wider flex-shrink-0">
-                  {isChinese ? "确认" : "Order"}
+                  Order
                 </button>
               </form>
               {orderTypingWrong && (
-                <div className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
+                <div data-task-editor-item="error-message" className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
                   <AlertTriangle size={11} /> Not a valid choice — type one of
                   the options above
                 </div>
               )}
               {orderWrong && (
-                <p className="text-yellow-300 text-xs mt-2">
+                <p data-task-editor-item="sale-error" className="text-yellow-300 text-xs mt-2">
                   The shopkeeper says: "That's not what we sell here." Try the
                   ice cream option.
                 </p>
@@ -3161,66 +3936,58 @@ function BellaShopAdventure({
               <div className="flex items-center gap-2.5 mb-2">
                 <div className="w-2.5 h-2.5 rounded-full bg-blue-400 flex-shrink-0 animate-pulse" />
                 <span className="text-[11px] uppercase tracking-[0.2em] font-semibold text-blue-300">
-                  {isChinese ? "乔希正在点单…" : "Josh is ordering..."}
+                  Josh is ordering...
                 </span>
               </div>
               <p
-                className="text-white text-lg leading-snug"
+                className="text-white text-xl leading-snug"
                 style={{ fontFamily: "'Playfair Display', serif" }}
               >
-                {isChinese
-                  ? chosenOrder.englishLabel
-                  : chosenOrder.italianLabel}
+                {shopKorean(chosenOrder.prompt)}
               </p>
-              <p className="text-white/50 text-xs italic mt-1">
-                {isChinese
-                  ? chosenOrder.italianLabel
-                  : chosenOrder.englishLabel}
-              </p>
+              {shopRomanisationEnabled && <p className="mt-1 text-xs text-sky-200">{capitaliseStandalone(shopRomanisation(chosenOrder.prompt))}</p>}
+              <p className="mt-1 text-xs text-white/55">{chosenOrder.englishLabel}</p>
             </div>
           </div>
         )}
 
         {phase === "grazie" && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+            className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-10 w-[min(36rem,calc(100%-2rem))] -translate-x-1/2"
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="relative rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
+              data-task-editor-panel="cafe-thank-you"
+              className="shop-task-box shared-task-bar-ui relative px-4 pb-3 pt-3"
             >
-              <button onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
+              <button data-task-editor-item="close" onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
               {grazieDone ? (
                 <div className="text-center py-4">
                   <div className="flex items-center justify-center gap-2 text-green-400 mb-2">
                     <Sparkles size={20} />
                     <span className="text-lg font-bold">
-                      {isChinese ? "已解锁新单词！" : "You unlocked the word!"}
+                      You unlocked the word!
                     </span>
                     <Sparkles size={20} />
                   </div>
                   <p className="text-white/60 text-sm">
-                    <span className="text-green-400 font-medium">
-                      Thank you
-                    </span>{" "}
-                    = 谢谢
+                    <span className="text-green-400 font-medium">감사합니다</span>
+                    {shopRomanisationEnabled && <span className="ml-2 text-sky-200">Gamsahamnida</span>}
+                    <span className="ml-2">Thank you</span>
                   </p>
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center gap-2 mb-2">
+                  <div data-task-editor-item="instruction" className="flex w-fit items-center gap-2 mb-2">
                     <div className="w-2 h-2 rounded-full bg-[#e8a59c] flex-shrink-0" />
                     <span className="text-[#e8a59c] text-[9px] uppercase tracking-[0.12em] font-semibold">
-                      {isChinese
-                        ? "贝拉说——输入她说的话"
-                        : "Bella says — type what she says"}
+                      Bella says — type what she says
                     </span>
                   </div>
-                  <div className="bg-white/5 rounded-lg px-3 py-2 mb-2">
-                    <div className="flex items-center gap-2 flex-wrap">
+                  <div data-task-editor-item="word-cue" className="my-2 w-fit">
+                    <div className="flex items-center gap-2 flex-wrap text-2xl font-semibold tracking-[0.12em]">
                       <span className="text-white/50 text-[10px]">
-                        {isChinese ? "贝拉：" : "Bella:"}
+                        Bella:
                       </span>
                       {(() => {
                         const ws = getSimpleMatchState(
@@ -3228,7 +3995,7 @@ function BellaShopAdventure({
                           GRAZIE_WORDS,
                         );
                         return GRAZIE_WORDS.map((wt, wi) =>
-                          wt.word.split("").map((letter, li) => (
+                          shopKorean(wt.word).split("").map((letter, li) => (
                             <span
                               key={li}
                               className={`transition-colors ${ws[wi] && li < ws[wi].matchedLetters ? "text-green-400" : "text-white/90"} underline decoration-dotted decoration-white/30 underline-offset-2`}
@@ -3239,24 +4006,10 @@ function BellaShopAdventure({
                         );
                       })()}
                     </div>
-                    <div className="flex items-center gap-2 mt-1 flex-wrap">
-                      {(() => {
-                        const ws = getSimpleMatchState(
-                          grazieInput,
-                          GRAZIE_WORDS,
-                        );
-                        return GRAZIE_WORDS.map((wt, ewi) => (
-                          <span
-                            key={ewi}
-                            className={`text-xs transition-colors ${(ws[ewi]?.matchedLetters ?? 0) > 0 ? "text-green-400" : "text-white/40"}`}
-                          >
-                            {wt.translation}
-                          </span>
-                        ));
-                      })()}
-                    </div>
+                    {shopRomanisationEnabled && <p className="mt-1 text-xs text-sky-200">Gamsahamnida</p>}
+                    <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">Thank you</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
                     <input
                       value={grazieInput}
                       onChange={(e) => setGrazieInput(e.target.value)}
@@ -3266,18 +4019,18 @@ function BellaShopAdventure({
                       className="flex-1 bg-white/5 text-white text-xs outline-none placeholder-white/30 caret-white min-w-0 border-b border-white/20 focus:border-white/60 py-1.5 rounded-lg px-2"
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder="输入 Bella 说的话…"
+                      placeholder="Type what Bella says..."
                       autoFocus
                     />
                     <button
                       onClick={handleGrazieSubmit}
                       className="bg-white/10 hover:bg-white/20 border border-white/20 hover:border-white/40 text-white text-xs px-4 py-2 rounded-lg transition-all uppercase tracking-wider flex-shrink-0"
                     >
-                      确认
+                      Enter
                     </button>
                   </div>
                   {grazieWrong && (
-                    <div className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
+                    <div data-task-editor-item="error-message" className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
                       <AlertTriangle size={11} /> Not quite — listen to Bella
                       and try again
                     </div>
@@ -3290,53 +4043,50 @@ function BellaShopAdventure({
 
         {phase === "prego" && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+            className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-10 w-[min(36rem,calc(100%-2rem))] -translate-x-1/2"
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="relative rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
+              data-task-editor-panel="cafe-you-are-welcome"
+              className="shop-task-box shared-task-bar-ui relative px-4 pb-3 pt-3"
             >
-              <button onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
+              <button data-task-editor-item="close" onClick={() => { cancel(); setPhase("counter"); }} aria-label="Close task" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-white/10 text-lg text-white/75 hover:bg-white/20">×</button>
               {pregoDone ? (
                 <div className="text-center py-4">
                   <div className="flex items-center justify-center gap-2 text-green-400 mb-2">
                     <Sparkles size={20} />
                     <span className="text-lg font-bold">
-                      {isChinese ? "已解锁新单词！" : "You unlocked the word!"}
+                      You unlocked the word!
                     </span>
                     <Sparkles size={20} />
                   </div>
                   <p className="text-white/60 text-sm">
-                    <span className="text-green-400 font-medium">
-                      You are welcome
-                    </span>{" "}
-                    = 不客气
+                    <span className="text-green-400 font-medium">천만에요</span>
+                    {shopRomanisationEnabled && <span className="ml-2 text-sky-200">Cheonmaneyo</span>}
+                    <span className="ml-2">You are welcome</span>
                   </p>
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center gap-2 mb-2">
+                  <div data-task-editor-item="instruction" className="flex w-fit items-center gap-2 mb-2">
                     <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
                     <span
                       className={`text-[#c4942a] uppercase tracking-[0.12em] font-semibold ${isChinese ? "text-xs" : "text-[9px]"}`}
                     >
-                      {isChinese
-                        ? "店员说——输入店员说的话"
-                        : "Shopkeeper says — type what they say"}
+                      Shopkeeper says — type what they say
                     </span>
                   </div>
-                  <div className="bg-white/5 rounded-lg px-3 py-2 mb-2">
-                    <div className="flex items-center gap-2 flex-wrap">
+                  <div data-task-editor-item="word-cue" className="my-2 w-fit">
+                    <div className="flex items-center gap-2 flex-wrap text-2xl font-semibold tracking-[0.12em]">
                       <span
                         className={`text-white/50 ${isChinese ? "text-xs" : "text-[10px]"}`}
                       >
-                        {isChinese ? "店员：" : "Shopkeeper:"}
+                        Shopkeeper:
                       </span>
                       {(() => {
                         const ws = getSimpleMatchState(pregoInput, PREGO_WORDS);
                         return PREGO_WORDS.map((wt, wi) =>
-                          wt.word.split("").map((letter, li) => (
+                          shopKorean(wt.word).split("").map((letter, li) => (
                             <span
                               key={li}
                               className={`transition-colors ${ws[wi] && li < ws[wi].matchedLetters ? "text-green-400" : "text-white/90"} underline decoration-dotted decoration-white/30 underline-offset-2`}
@@ -3347,21 +4097,10 @@ function BellaShopAdventure({
                         );
                       })()}
                     </div>
-                    <div className="flex items-center gap-2 mt-1 flex-wrap">
-                      {(() => {
-                        const ws = getSimpleMatchState(pregoInput, PREGO_WORDS);
-                        return PREGO_WORDS.map((wt, ewi) => (
-                          <span
-                            key={ewi}
-                            className={`text-xs transition-colors ${(ws[ewi]?.matchedLetters ?? 0) > 0 ? "text-green-400" : "text-white/40"}`}
-                          >
-                            {wt.translation}
-                          </span>
-                        ));
-                      })()}
-                    </div>
+                    {shopRomanisationEnabled && <p className="mt-1 text-xs text-sky-200">Cheonmaneyo</p>}
+                    <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">You are welcome</p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
                     <input
                       value={pregoInput}
                       onChange={(e) => setPregoInput(e.target.value)}
@@ -3371,18 +4110,18 @@ function BellaShopAdventure({
                       className="flex-1 bg-white/5 text-white text-xs outline-none placeholder-white/30 caret-white min-w-0 border-b border-white/20 focus:border-white/60 py-1.5 rounded-lg px-2"
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder="输入店主说的话…"
+                      placeholder="Type what the shopkeeper says..."
                       autoFocus
                     />
                     <button
                       onClick={handlePregoSubmit}
                       className="bg-white/10 hover:bg-white/20 border border-white/20 hover:border-white/40 text-white text-xs px-4 py-2 rounded-lg transition-all uppercase tracking-wider flex-shrink-0"
                     >
-                      确认
+                      Enter
                     </button>
                   </div>
                   {pregoWrong && (
-                    <div className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
+                    <div data-task-editor-item="error-message" className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
                       <AlertTriangle size={11} /> Not quite — listen and try
                       again
                     </div>
@@ -3456,7 +4195,46 @@ const roamWordBoxes: RoamWordBox[] = [
   { id: "road", italian: "Road", english: "道路", fact: "桥旁的道路沿着一条穿过村庄的路线；这个村庄主要在18和19世纪发展起来。", points: [{ x: 43.5, y: 68.3 }, { x: 47.9, y: 72.3 }], moveAt: 104, movedPoints: [{ x: 22.7, y: 69 }, { x: 27.8, y: 74 }], showFrom: 100, showUntil: 110 },
   { id: "forest", italian: "Forest", english: "森林", fact: "伍德斯托克周围的森林数百年来塑造了这座小镇，为早期定居者提供木材、柴火和土地。", points: [{ x: 76.5, y: 41 }, { x: 80.8, y: 45.9 }], showFrom: 110, showUntil: 120 },
 ];
-const ROAM_WORD_TARGET = 16;
+const WOODSTOCK_WORD_TARGET = new Set(roamWordBoxes.map((word) => word.id)).size;
+const ROAM_KOREAN: Record<string, string> = {
+  bridge: "다리", trees: "나무", river: "강", sky: "하늘", leaves: "나뭇잎",
+  rocks: "바위", current: "물살", cars: "자동차", crosswalk: "횡단보도", road: "도로", forest: "숲",
+};
+const ROAM_ROMANISATION: Record<string, string> = {
+  bridge: "Da-ri", trees: "Na-mu", river: "Gang", sky: "Ha-neul", leaves: "Na-mun-nip",
+  rocks: "Ba-wi", current: "Mul-ssal", cars: "Ja-dong-cha", crosswalk: "Hoeng-dan-bo-do", road: "Do-ro", forest: "Sup",
+};
+const ROAM_ENGLISH_FACTS: Record<string, string> = {
+  bridge: "This iron bridge was first built around 1870. When it was rebuilt in 1980, its historic truss design was preserved.",
+  trees: "Woodstock is known for its maple trees. In autumn, sugar maples turn bright yellow, orange, and deep red.",
+  river: "The Ottauquechee River runs through Woodstock. Its name comes from an Indigenous word often interpreted as a fast mountain stream.",
+  sky: "Woodstock's mountain weather brings moving clouds, sudden rain, and clear blue skies, so the sky can change quickly.",
+  leaves: "In autumn, red, orange, and gold leaves sweep through Woodstock's streets and forests.",
+  rocks: "Old rocks and stone walls are found throughout the area, shaped by glaciers and generations of New England farmers.",
+  current: "Clear streams run down from the surrounding hills, especially after rain or melting snow.",
+  cars: "During autumn, visitors coming to see Vermont's famous foliage often fill the roads around Woodstock with cars.",
+  crosswalk: "This crosswalk sits near one of Woodstock's older village routes, used for generations between homes, shops, and the river.",
+  road: "The road beside the bridge follows a route through the village that developed mainly during the eighteenth and nineteenth centuries.",
+  forest: "The forests around Woodstock have shaped the town for centuries, providing timber, fuel, and land for early settlers.",
+};
+const HEARST_ROAM_WORDS: RoamWordBox[] = [
+  { id: "hearst-stairs", italian: "Stairs", english: "계단", fact: "The grand stone stairways guide visitors toward Casa Grande, the main building, while giving sweeping views over the gardens and surrounding hills, making the entrance feel almost like arriving at a European palace.", points: [{ x: 32.8, y: 74.1 }, { x: 36.9, y: 77.5 }], showFrom: 2, showUntil: 9 },
+  { id: "hearst-garden", italian: "Garden", english: "정원", fact: "The citrus trees near the entrance help give Hearst Castle its Mediterranean feel, matching the Spanish and southern European influences of the estate. The gardens were carefully planned by architect Julia Morgan and landscape designers, with plants chosen to complement the buildings. Hearst wanted the grounds to feel abundant and colourful rather than overly formal, which is why greenery like these trees surrounds the approach to the castle.", points: [{ x: 52.1, y: 55.3 }, { x: 58.6, y: 62.1 }], showFrom: 9, showUntil: 19 },
+  { id: "hearst-statue", italian: "Statue", english: "조각상", fact: "Hearst filled the estate with sculptures and antiques inspired by ancient Greece, Rome, and Renaissance Europe, so statues like this were meant to make the terraces feel like part of a grand Mediterranean palace.", points: [{ x: 48.7, y: 46.2 }, { x: 53.1, y: 51.4 }], showFrom: 20, showUntil: 30 },
+  { id: "hearst-ocean", italian: "Ocean", english: "바다", fact: "The Pacific Ocean is visible from many terraces and gardens because the estate sits high on a hill above San Simeon. William Randolph Hearst chose the location partly for these huge coastal views, and on clear days the ocean makes the castle feel even more dramatic and isolated, almost like a palace overlooking the sea.", points: [{ x: 24.4, y: 56.4 }, { x: 28.4, y: 59.5 }], showFrom: 36, showUntil: 43 },
+  { id: "hearst-shadows", italian: "Shadows", english: "그림자", fact: "The strong California sunlight creates sharp shadows from the palm trees, statues, columns, and terraces. These shadows make the shapes and details of the architecture stand out more, especially on bright, clear days.", points: [{ x: 50.3, y: 76.7 }, { x: 54.6, y: 80.9 }], showFrom: 46, showUntil: 54 },
+];
+const HEARST_ROAM_KOREAN: Record<string, string> = Object.fromEntries(HEARST_ROAM_WORDS.map((word) => [word.id, word.english]));
+const HEARST_ROAM_ROMANISATION: Record<string, string> = {
+  "hearst-stairs": "Gye-dan",
+  "hearst-garden": "Jeong-won",
+  "hearst-statue": "Jo-gak-sang",
+  "hearst-ocean": "Ba-da",
+  "hearst-shadows": "Geu-rim-ja",
+};
+const HEARST_ROAM_FACTS: Record<string, string> = Object.fromEntries(HEARST_ROAM_WORDS.map((word) => [word.id, word.fact]));
+const HEARST_WORD_TARGET = new Set(HEARST_ROAM_WORDS.map((word) => word.id)).size;
+const ROAM_WORD_TARGET = WOODSTOCK_WORD_TARGET + HEARST_WORD_TARGET;
 const ROAM_REGIONS = {
   canada: { label: "Canada", labelZh: "加拿大", title: "Canada Roam Map", titleZh: "加拿大漫游地图", map: "maps/roam-canada-map-v2.png" },
   usa: { label: "USA", labelZh: "美国", title: "USA Roam Map", titleZh: "美国漫游地图", map: "maps/north-america-roam-map-v2.png" },
@@ -3484,10 +4262,12 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   const overlay = useDebugOverlay();
   const { debugMode, sceneRef, handleSceneMouseMove } = overlay;
   const { speak } = useSpeech();
-  const { isChinese } = useLanguage();
+  // Roam is intentionally English-only, independent of the app-wide language setting.
+  const isChinese = false;
   const roamKey = `taletalk-slot-${Number(localStorage.getItem("taletalk_active_save_slot") ?? "1")}-roam-collected-words-v2`;
   const videoRef = useRef<HTMLVideoElement>(null);
   const roamAudioRef = useRef<HTMLAudioElement>(null);
+  const mapAudioRef = useRef<HTMLAudioElement>(null);
   const [showControls, setShowControls] = useState(false);
   const [isPlaying, setIsPlaying] = useState(true);
   const [videoMuted, setVideoMuted] = useState(false);
@@ -3496,10 +4276,13 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   const [tipDismissed, setTipDismissed] = useState(false);
   const [activeWord, setActiveWord] = useState<RoamWordBox | null>(null);
   const [activeWordInput, setActiveWordInput] = useState("");
-  const [autoPauseOnWord, setAutoPauseOnWord] = useState(true);
-  const [pausedForActiveWord, setPausedForActiveWord] = useState(false);
+  const [roamRomanisationEnabled, setRoamRomanisationEnabled] = useState(() => localStorage.getItem("taletalk-romanisation-enabled") === "true");
+  useEffect(() => { const sync = (event: Event) => setRoamRomanisationEnabled(Boolean((event as CustomEvent<boolean>).detail)); window.addEventListener("taletalk-romanisation-change", sync); return () => window.removeEventListener("taletalk-romanisation-change", sync); }, []);
   const [videoIndex, setVideoIndex] = useState(0);
+  const [roamDestination, setRoamDestination] = useState<RoamDestination>("woodstock");
+  const [primedRoamDestination, setPrimedRoamDestination] = useState<RoamDestination>("woodstock");
   const [locationSelected, setLocationSelected] = useState(false);
+  const [hearstIntroductionOpen, setHearstIntroductionOpen] = useState(false);
   const [mapMuted, setMapMuted] = useState(false);
   const [roamRegion, setRoamRegion] = useState<RoamRegion | null>(null);
   const [regionWallpaperIndex] = useState(() => Number(localStorage.getItem("taletalk-roam-region-wallpaper-index") ?? "0") % ROAM_REGION_WALLPAPERS.length);
@@ -3511,10 +4294,43 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
     () => JSON.parse(localStorage.getItem(roamKey) ?? "[]") as RoamWordBox[],
   );
   const [savedWordsOpen, setSavedWordsOpen] = useState(false);
+  const [roamSettingsOpen, setRoamSettingsOpen] = useState(false);
+  const [roamMapSettingsOpen, setRoamMapSettingsOpen] = useState(false);
+  const [roamProgressOpen, setRoamProgressOpen] = useState(false);
+  const [roamProgressSection, setRoamProgressSection] = useState<"words" | "locations" | null>(null);
+  const [hearstUnlockNotice, setHearstUnlockNotice] = useState(false);
+  const [unlockedWordNotice, setUnlockedWordNotice] = useState<{ korean: string; english: string } | null>(null);
+  const uniqueSavedWords = [...new Map(savedWords.map((word) => [word.id, word])).values()];
+  const woodstockWordCount = uniqueSavedWords.filter((word) => !word.id.startsWith("hearst-")).length;
+  const hearstWordCount = uniqueSavedWords.filter((word) => word.id.startsWith("hearst-")).length;
+  const hearstUnlocked = woodstockWordCount >= 5;
+  const unlockedLocationCount = 1 + Number(hearstUnlocked);
+  const currentDestinationWordCount = roamDestination === "california" ? hearstWordCount : woodstockWordCount;
+  const currentDestinationWordTarget = roamDestination === "california" ? HEARST_WORD_TARGET : WOODSTOCK_WORD_TARGET;
+  const hearstUnlockKey = `${roamKey}-hearst-unlocked`;
 
   useEffect(() => {
     localStorage.setItem(roamKey, JSON.stringify(savedWords));
+    window.dispatchEvent(new Event("taletalk-progress-changed"));
   }, [roamKey, savedWords]);
+
+  useEffect(() => {
+    if (!roamLoading) return;
+    const fallback = window.setTimeout(() => setRoamLoading(false), 350);
+    return () => window.clearTimeout(fallback);
+  }, [roamLoading, roamDestination]);
+
+  useEffect(() => {
+    if (!hearstUnlocked || localStorage.getItem(hearstUnlockKey) === "true") return;
+    localStorage.setItem(hearstUnlockKey, "true");
+    setHearstUnlockNotice(true);
+  }, [hearstUnlocked, hearstUnlockKey]);
+
+  useEffect(() => {
+    if (!unlockedWordNotice) return;
+    const timeout = window.setTimeout(() => setUnlockedWordNotice(null), 2200);
+    return () => window.clearTimeout(timeout);
+  }, [unlockedWordNotice]);
 
   useEffect(
     () => () => {
@@ -3525,26 +4341,46 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
   );
 
   useEffect(() => {
-    ROAM_REGION_WALLPAPERS.forEach((source) => void preloadImage(source));
-  }, []);
+    return scheduleIdleImagePreload([
+      ROAM_REGION_WALLPAPERS[(regionWallpaperIndex + 1) % ROAM_REGION_WALLPAPERS.length],
+    ]);
+  }, [regionWallpaperIndex]);
 
   useEffect(() => () => {
     localStorage.setItem("taletalk-roam-region-wallpaper-index", String((regionWallpaperIndex + 1) % ROAM_REGION_WALLPAPERS.length));
   }, [regionWallpaperIndex]);
 
-  const startRoam = () => {
-    setVideoMuted(true);
+  const beginRoam = (destination: RoamDestination) => {
+    const destinationConfig = ROAM_DESTINATIONS[destination];
+    setRoamDestination(destination);
+    setVideoIndex(0);
+    setCurrentTime(0);
+    setActiveWord(null);
     roamAudioRef.current?.pause();
-    const audio = new Audio(assetUrl("audio/woodstock-roam-audio.mp3"));
-    audio.preload = "auto";
-    audio.volume = 1;
-    audio
-      .play()
-      .then(() => setVideoMuted(false))
-      .catch(() => setVideoMuted(true));
-    roamAudioRef.current = audio;
+    roamAudioRef.current = null;
+    if (destinationConfig.usesWoodstockAudio) {
+      setVideoMuted(true);
+      const audio = new Audio(assetUrl("audio/woodstock-roam-audio.mp3"));
+      audio.preload = "auto";
+      audio.volume = 1;
+      audio
+        .play()
+        .then(() => setVideoMuted(false))
+        .catch(() => setVideoMuted(true));
+      roamAudioRef.current = audio;
+    } else {
+      setVideoMuted(false);
+    }
     setRoamLoading(true);
     setLocationSelected(true);
+  };
+  const startRoam = (destination: RoamDestination) => {
+    if (destination === "california") {
+      setRoamDestination(destination);
+      setHearstIntroductionOpen(true);
+      return;
+    }
+    beginRoam(destination);
   };
   const playMapHover = () => {
     if (mapMuted) return;
@@ -3560,24 +4396,63 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
       oscillator.start(); oscillator.stop(context.currentTime + 0.17);
     } catch { /* Optional UI feedback. */ }
   };
+  const returnToRegionPicker = () => {
+    roamAudioRef.current?.pause();
+    setHearstIntroductionOpen(false);
+    setLocationSelected(false);
+    setRoamRegion(null);
+  };
+  const toggleMapSound = () => {
+    setMapMuted((muted) => {
+      const nextMuted = !muted;
+      const audio = mapAudioRef.current;
+      if (audio) {
+        audio.muted = nextMuted;
+        if (!nextMuted) void audio.play().catch(() => undefined);
+      }
+      return nextMuted;
+    });
+  };
   const activeRoamRegion = roamRegion ?? "usa";
+  const activeRoamVideos = ROAM_DESTINATIONS[roamDestination].videos;
+  const usesWoodstockAudio = ROAM_DESTINATIONS[roamDestination].usesWoodstockAudio;
+  const activeRoamWordBoxes = roamDestination === "california" ? HEARST_ROAM_WORDS : roamWordBoxes;
+  const activeRoamKorean = roamDestination === "california" ? HEARST_ROAM_KOREAN : ROAM_KOREAN;
+  const activeRoamRomanisations = roamDestination === "california" ? HEARST_ROAM_ROMANISATION : ROAM_ROMANISATION;
+  const activeWordKorean = activeWord ? activeRoamKorean[activeWord.id] ?? activeWord.italian : "";
+  const activeWordRomanisation = activeWord ? activeRoamRomanisations[activeWord.id] ?? "" : "";
+  const roamInputTarget = roamRomanisationEnabled && /[a-z]/i.test(activeWordInput) ? activeWordRomanisation : activeWordKorean;
+  const normaliseRoamAnswer = (value: string) => value.trim().toLowerCase().replace(/[\s-]+/g, "");
+  const activeRoamFacts = roamDestination === "california" ? HEARST_ROAM_FACTS : ROAM_ENGLISH_FACTS;
+  const toggleRoamRomanisation = () => {
+    const next = !roamRomanisationEnabled;
+    setRoamRomanisationEnabled(next);
+    localStorage.setItem("taletalk-romanisation-enabled", String(next));
+    window.dispatchEvent(new CustomEvent("taletalk-romanisation-change", { detail: next }));
+  };
 
-  const closeActiveWord = () => {
+  const toggleRoamPlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void video.play().catch(() => setIsPlaying(false));
+    } else {
+      video.pause();
+    }
+  };
+
+  const closeActiveWord = (dismissCompletedWord = false) => {
     if (!activeWord) return;
-    setDismissedWordIds((ids) =>
-      ids.includes(activeWord.id) ? ids : [...ids, activeWord.id],
-    );
+    if (dismissCompletedWord) {
+      setDismissedWordIds((ids) =>
+        ids.includes(activeWord.id) ? ids : [...ids, activeWord.id],
+      );
+    }
     setActiveWord(null);
     const video = videoRef.current;
-    if (pausedForActiveWord && video?.paused) {
-      video
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch(() => setVideoMuted(true));
-      if (!videoMuted)
-        roamAudioRef.current?.play().catch(() => setVideoMuted(true));
+    if (video?.paused) {
+      void video.play().catch(() => setIsPlaying(false));
     }
-    setPausedForActiveWord(false);
   };
 
   useEffect(() => {
@@ -3611,7 +4486,7 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
     const onPlay = () => {
       setIsPlaying(true);
       const audio = roamAudioRef.current;
-      if (!videoMuted && audio?.paused) {
+      if (usesWoodstockAudio && !videoMuted && audio?.paused) {
         audio.currentTime = v.currentTime;
         audio.play().catch(() => setVideoMuted(true));
       }
@@ -3626,8 +4501,8 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
     // React's muted attribute can be retained by the browser after an autoplay
     // fallback. Set the live media properties as well so a Woodstock click
     // really restores the video's audio track.
-    v.muted = true;
-    v.defaultMuted = true;
+    v.muted = usesWoodstockAudio || videoMuted;
+    v.defaultMuted = usesWoodstockAudio || videoMuted;
     // Native controls do not emit timeupdate at the same cadence in every
     // browser. Poll the media clock so timed word overlays stay in sync.
     const clock = window.setInterval(() => setCurrentTime(v.currentTime), 100);
@@ -3643,32 +4518,37 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
     };
-  }, [locationSelected, videoIndex, videoMuted]);
+  }, [locationSelected, roamDestination, videoIndex, usesWoodstockAudio]);
 
   if (!locationSelected && !roamRegion) {
     return (
       <div ref={sceneRef} className="roam-location-screen roam-region-picker-screen" style={{ backgroundImage: `url('${ROAM_REGION_WALLPAPERS[regionWallpaperIndex]}')` }} onMouseMove={handleSceneMouseMove}>
-        <audio autoPlay loop muted={mapMuted} volume={0.32} src={assetUrl("audio/countryside-roam.mp3")} />
+        <audio ref={mapAudioRef} autoPlay loop muted={mapMuted} volume={0.32} src={assetUrl("audio/countryside-roam.mp3")} />
         <header className="roam-location-header">
           <div>
             <p>{isChinese ? "选择目的地" : "Choose a destination"}</p>
             <h1>{isChinese ? "选择你想去旅行的地方" : "Select where you want to travel"}</h1>
           </div>
           <div className="roam-map-top-actions roam-region-picker-actions">
-            <button className="world-map-menu" onClick={() => setMapMuted((muted) => !muted)}>{isChinese ? (mapMuted ? "声音开" : "声音关") : (mapMuted ? "Sound on" : "Sound off")}</button>
+            <button className="world-map-menu" onClick={toggleMapSound}>{isChinese ? (mapMuted ? "声音开" : "声音关") : (mapMuted ? "Sound on" : "Sound off")}</button>
             <button className="world-map-menu" onClick={onMenu}>{isChinese ? "菜单" : "Menu"}</button>
           </div>
         </header>
         <div className="roam-region-grid">
           {(Object.entries(ROAM_REGIONS) as [RoamRegion, (typeof ROAM_REGIONS)[RoamRegion]][]).map(([key, region]) => (
-            <button key={key} className="roam-region-card" onClick={() => setRoamRegion(key)} onMouseEnter={playMapHover}>
+            <button
+              key={key}
+              className={`roam-region-card ${key === "usa" ? "" : "roam-region-card-locked"}`}
+              onClick={() => { if (key === "usa") setRoamRegion(key); }}
+              onMouseEnter={() => { if (key === "usa") playMapHover(); }}
+              aria-disabled={key !== "usa"}
+            >
               <img src={assetUrl(region.map)} alt={`${region.label} map`} draggable={false} />
               <span>{isChinese ? region.labelZh : region.label}</span>
-              <small>{key === "usa" ? (isChinese ? "开始漫游" : "Begin roaming") : (isChinese ? "查看地图" : "View map")}</small>
+              <small>{key === "usa" ? (isChinese ? "开始漫游" : "Begin roaming") : (isChinese ? "已锁定" : "Locked")}</small>
             </button>
           ))}
         </div>
-        <footer className="roam-location-footer">{isChinese ? "选择一个地区查看它的漫游地图。" : "Choose a region to view its Roam map."}</footer>
         {debugMode && <DebugOverlayPanel overlay={overlay} mediaLabel="Roam destination selection" />}
       </div>
     );
@@ -3681,58 +4561,113 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
         className="roam-location-screen"
         onMouseMove={handleSceneMouseMove}
       >
-        <audio autoPlay loop muted={mapMuted} volume={0.32} src={assetUrl("audio/countryside-roam.mp3")} />
-        <img
+        <audio ref={mapAudioRef} autoPlay loop muted={mapMuted} volume={0.32} src={assetUrl("audio/countryside-roam.mp3")} />
+        <SmoothSceneImage
           src={assetUrl(ROAM_REGIONS[activeRoamRegion].map)}
           alt={ROAM_REGIONS[activeRoamRegion].title}
           className="roam-location-map"
           draggable={false}
         />
-        <video
-          aria-hidden="true"
-          className="hidden"
-          src={ROAM_VIDEOS[0]}
-          preload="auto"
-          muted
-          playsInline
-        />
+        <video aria-hidden="true" className="hidden" src={ROAM_DESTINATIONS[primedRoamDestination].videos[0]} preload="auto" muted playsInline />
         <div className="roam-location-shade" />
         <header className="roam-location-header">
           <div>
             <p>{isChinese ? "选择目的地" : "Choose a destination"}</p>
             <h1>{isChinese ? ROAM_REGIONS[activeRoamRegion].titleZh : ROAM_REGIONS[activeRoamRegion].title}</h1>
           </div>
-          <div className="roam-map-top-actions">
-            <button className="world-map-menu" onClick={() => setRoamRegion(null)}>{isChinese ? "选择地区" : "Choose region"}</button>
-            <button className="world-map-menu" onClick={() => setMapMuted((muted) => !muted)}>{isChinese ? (mapMuted ? "声音开" : "声音关") : (mapMuted ? "Sound on" : "Sound off")}</button>
+          <div className="map-settings roam-map-settings">
+            <button className="map-settings-trigger" type="button" onClick={() => setRoamMapSettingsOpen((open) => !open)} aria-label="Roam map settings" aria-expanded={roamMapSettingsOpen}>
+              <Settings size={20} />
+            </button>
+            {roamMapSettingsOpen && <div className="map-settings-menu">
+              <button onClick={toggleMapSound}>{mapMuted ? <Volume2 size={15} /> : <VolumeX size={15} />}{mapMuted ? "Sound on" : "Sound off"}</button>
+              <button onClick={returnToRegionPicker}>Choose region</button>
+              <button onClick={onMenu}>Main menu</button>
+            </div>}
           </div>
         </header>
-        <button className="world-map-menu roam-choose-region" onClick={onMenu}>{isChinese ? "菜单" : "Menu"}</button>
-        <div className="roam-map-summary">
-          <span className="roam-map-progress"><b>1/1 地点已解锁</b></span>
-          <span className="roam-map-progress">{savedWords.length}/{ROAM_WORD_TARGET} 伍德斯托克单词已解锁</span>
+        <div className={`roam-progress-panel ${roamProgressOpen ? "is-open" : ""}`}>
+          <button
+            type="button"
+            className="roam-progress-trigger"
+            onClick={() => setRoamProgressOpen((open) => !open)}
+            aria-expanded={roamProgressOpen}
+          >
+            <BookOpen size={18} />
+            <span>Progress</span>
+            <ChevronRight size={16} className={roamProgressOpen ? "rotate-90" : ""} />
+          </button>
+          {roamProgressOpen && <div className="roam-progress-content">
+            <section>
+              <button type="button" onClick={() => setRoamProgressSection((section) => section === "words" ? null : "words")} aria-expanded={roamProgressSection === "words"}>
+                <span>Words unlocked</span><b>{uniqueSavedWords.length}/{ROAM_WORD_TARGET}</b>
+              </button>
+              {roamProgressSection === "words" && <div className="roam-progress-list">
+                {uniqueSavedWords.length ? uniqueSavedWords
+                  .sort((a, b) => a.italian.localeCompare(b.italian))
+                  .map((word) => <div key={word.id}>
+                    <strong>{(word.id.startsWith("hearst-") ? HEARST_ROAM_KOREAN[word.id] : ROAM_KOREAN[word.id]) ?? word.italian}</strong>
+                    <span>{capitaliseStandalone(word.italian)}</span>
+                  </div>) : <p>No words unlocked yet.</p>}
+              </div>}
+            </section>
+            <section>
+              <button type="button" onClick={() => setRoamProgressSection((section) => section === "locations" ? null : "locations")} aria-expanded={roamProgressSection === "locations"}>
+                <span>Locations unlocked</span><b>{unlockedLocationCount}/2</b>
+              </button>
+              {roamProgressSection === "locations" && <div className="roam-progress-list roam-progress-locations">
+                <div><strong>Woodstock, Vermont</strong><span>{woodstockWordCount}/{WOODSTOCK_WORD_TARGET} words</span></div>
+                <div className={hearstUnlocked ? "" : "is-locked"}><strong>Hearst Castle, California</strong><span>{hearstUnlocked ? `${hearstWordCount}/${HEARST_WORD_TARGET} words` : "Locked · unlock 5 Woodstock words"}</span></div>
+              </div>}
+            </section>
+          </div>}
         </div>
-        <span className="roam-map-instruction">{isChinese ? "选择一个区域开始本次漫游。" : "Select an area to begin this roam."}</span>
+        {hearstIntroductionOpen && (
+          <div className="roam-hearst-introduction-backdrop" role="presentation">
+            <section className="roam-hearst-introduction" role="dialog" aria-modal="true" aria-labelledby="hearst-introduction-title">
+              <p>California Roam</p>
+              <h2 id="hearst-introduction-title">Hearst Castle</h2>
+              <div className="roam-hearst-introduction-rule" />
+              <div>
+                Hearst Castle is a famous historic estate located in San Simeon, California. Built for newspaper publisher William Randolph Hearst, it is known for its grand architecture, beautiful gardens, impressive art collection, and stunning views of the Pacific Ocean.
+              </div>
+              <button onClick={() => { setHearstIntroductionOpen(false); beginRoam("california"); }}>
+                Enter Hearst Castle
+              </button>
+            </section>
+          </div>
+        )}
         {activeRoamRegion === "usa" && <button
           className="roam-location-marker roam-location-marker-woodstock"
-          onClick={startRoam}
-          onMouseEnter={playMapHover}
+          onClick={() => startRoam("woodstock")}
+          onMouseEnter={() => { setPrimedRoamDestination("woodstock"); playMapHover(); }}
         >
           <strong>Woodstock, Vermont</strong>
           <small>{isChinese ? "开始漫游" : "Start roaming"}</small>
         </button>}
         {activeRoamRegion === "usa" && <button
           className="roam-location-marker roam-location-marker-woodstock roam-location-marker-account"
-          onClick={startRoam}
-          onMouseEnter={playMapHover}
+          onClick={() => startRoam("woodstock")}
+          onMouseEnter={() => { setPrimedRoamDestination("woodstock"); playMapHover(); }}
         >
           <strong>Woodstock, Vermont</strong>
           <small>
-            {savedWords.length}/{ROAM_WORD_TARGET} collected · Start roaming
+            {woodstockWordCount}/{WOODSTOCK_WORD_TARGET} collected · Start roaming
           </small>
           <em>
             A peaceful historic village surrounded by Vermont’s Green Mountains.
           </em>
+        </button>}
+        {activeRoamRegion === "usa" && <button
+          className={`roam-location-marker roam-location-marker-california roam-location-marker-california-account ${hearstUnlocked ? "" : "roam-location-marker-locked"}`}
+          onClick={() => { if (hearstUnlocked) startRoam("california"); }}
+          onMouseEnter={() => { if (hearstUnlocked) { setPrimedRoamDestination("california"); playMapHover(); } }}
+          aria-label={hearstUnlocked ? "Start Hearst Castle roaming" : "Hearst Castle is locked"}
+          aria-disabled={!hearstUnlocked}
+        >
+          <strong>Hearst Castle — California</strong>
+          <small>{hearstUnlocked ? `${hearstWordCount}/${HEARST_WORD_TARGET} collected · Start roaming` : "Locked · collect 5 Woodstock words to progress"}</small>
+          <em>A grand California estate above the Pacific coast.</em>
         </button>}
         {activeRoamRegion === "usa" && <><span className="roam-location-label roam-location-seattle">
           Seattle
@@ -3757,7 +4692,7 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
 
   return (
     <div
-      className="world-map-scene"
+      className="world-map-scene roam-video-screen"
       ref={sceneRef}
       onMouseMove={handleSceneMouseMove}
     >
@@ -3765,17 +4700,18 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
         key={videoIndex}
         ref={videoRef}
         className="world-map-image"
-        src={ROAM_VIDEOS[videoIndex]}
+        src={activeRoamVideos[videoIndex]}
         autoPlay
         preload="auto"
-        muted
+        muted={usesWoodstockAudio || videoMuted}
         controls={showControls}
         playsInline
         draggable={false}
         onEnded={() => {
           roamAudioRef.current?.pause();
-          setVideoIndex((index) => (index + 1) % ROAM_VIDEOS.length);
+          setVideoIndex((index) => (index + 1) % activeRoamVideos.length);
         }}
+        onLoadedData={() => setRoamLoading(false)}
         onCanPlay={() => setRoamLoading(false)}
       />
       {roamLoading && (
@@ -3786,51 +4722,65 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
       <video
         aria-hidden="true"
         className="hidden"
-        src={ROAM_VIDEOS[(videoIndex + 1) % ROAM_VIDEOS.length]}
+        src={activeRoamVideos[(videoIndex + 1) % activeRoamVideos.length]}
         preload="auto"
         muted
       />
       <div className="world-map-vignette" />
+      {hearstUnlockNotice && (
+        <div className="roam-unlock-notice-backdrop">
+          <section className="roam-unlock-notice" role="dialog" aria-modal="true" aria-labelledby="hearst-unlocked-title">
+            <span>✦</span>
+            <p>New Roam unlocked</p>
+            <h2 id="hearst-unlocked-title">Hearst Castle</h2>
+            <div>You unlocked Hearst Castle. It is now available on the USA Roam map.</div>
+            <button onClick={() => setHearstUnlockNotice(false)}>Continue</button>
+          </section>
+        </div>
+      )}
       <header className="world-map-topbar">
         <div>
           <h1>TaleTalk</h1>
         </div>
-        <div className="roam-top-actions">
-          <button
-            className="roam-tools-btn"
-            onClick={() => setSavedWordsOpen((open) => !open)}
-          >
-            <BookOpen size={14} />{" "}
-            {isChinese
-              ? `已收集单词 ${savedWords.length}/${ROAM_WORD_TARGET}`
-              : `Collected words ${savedWords.length}/${ROAM_WORD_TARGET}`}
+        <div className="roam-settings">
+          <button className="roam-settings-trigger" type="button" onClick={() => setRoamSettingsOpen((open) => !open)} aria-label="Roam settings" aria-expanded={roamSettingsOpen}>
+            <Settings size={20} />
           </button>
-          <button
-            className="roam-tools-btn"
-            onClick={() => {
+          {roamSettingsOpen && <div className="roam-settings-menu">
+            <button
+              className="roam-tools-btn"
+              onClick={() => { setSavedWordsOpen((open) => !open); setRoamSettingsOpen(false); }}
+            >
+              <BookOpen size={14} />{" "}
+              {isChinese
+                ? `已收集单词 ${uniqueSavedWords.length}/${ROAM_WORD_TARGET}`
+                : `Collected words ${currentDestinationWordCount}/${currentDestinationWordTarget}`}
+            </button>
+            <button
+              className="roam-tools-btn"
+              onClick={() => {
               const v = videoRef.current;
               const audio = roamAudioRef.current;
-              if (!v || !audio) return;
+              if (!v) return;
               const next = !videoMuted;
-              audio.muted = next;
-              if (!next) {
-                audio.currentTime = v.currentTime;
-                audio.volume = 1;
+              if (usesWoodstockAudio && audio) {
+                audio.muted = next;
+                if (!next) {
+                  audio.currentTime = v.currentTime;
+                  audio.volume = 1;
+                }
+                if (!next) audio.play().catch(() => setVideoMuted(true));
+              } else {
+                v.muted = next;
+                if (!next) v.play().catch(() => setVideoMuted(true));
               }
               setVideoMuted(next);
-              if (!next) audio.play().catch(() => setVideoMuted(true));
-            }}
-          >
-            {videoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}{" "}
-            {videoMuted
-              ? isChinese
-                ? "打开声音"
-                : "Unmute"
-              : isChinese
-                ? "静音"
-                : "Mute"}
-          </button>
-          {toolsEnabled ? (
+              }}
+            >
+              {videoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}{" "}
+              {videoMuted ? "Unmute" : "Mute"}
+            </button>
+            {toolsEnabled ? (
             <button
               className="roam-tools-btn"
               onClick={() => setToolsEnabled(false)}
@@ -3844,20 +4794,22 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
             >
               <Power size={14} /> {isChinese ? "打开提示" : "Turn on tools"}
             </button>
-          )}
-          <button className="world-map-menu" onClick={onMenu}>
-            {isChinese ? "菜单" : "Menu"}
-          </button>
+            )}
+            <button className="roam-tools-btn" onClick={onMenu}>
+              {isChinese ? "菜单" : "Menu"}
+            </button>
+          </div>}
         </div>
       </header>
 
       {/* Tutorial prompt — shows when mare first appears */}
-      {toolsEnabled &&
+      {roamDestination === "woodstock" &&
+        toolsEnabled &&
         !tipDismissed &&
         currentTime >= 2 &&
         currentTime < 10 &&
         activeWord === null && (
-          <div className="absolute right-4 top-1/2 -translate-y-1/2 z-30 max-w-[200px] pointer-events-auto">
+          <div className="roam-video-tip absolute right-4 top-1/2 -translate-y-1/2 z-30 pointer-events-auto">
             <button
               type="button"
               onClick={() => setTipDismissed(true)}
@@ -3878,13 +4830,24 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
           </div>
         )}
 
+      {unlockedWordNotice && (
+        <div className="roam-word-unlocked-toast" role="status" aria-live="polite">
+          <span><Check size={18} strokeWidth={3} /></span>
+          <div>
+            <small>Word unlocked</small>
+            <strong>{unlockedWordNotice.korean}</strong>
+            <em>{unlockedWordNotice.english}</em>
+          </div>
+        </div>
+      )}
+
       {debugMode && (
         <DebugOverlayPanel overlay={overlay} mediaLabel="roam-video.mp4" />
       )}
 
       {toolsEnabled &&
         activeWord === null &&
-        roamWordBoxes
+        activeRoamWordBoxes
           .filter(
             (w) =>
               currentTime >= w.showFrom &&
@@ -3905,42 +4868,29 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
                   e.stopPropagation();
                   setActiveWord(w);
                   setActiveWordInput("");
-                  speak(w.italian, "female");
-                  const video = videoRef.current;
-                  const wasPlaying = Boolean(video && !video.paused);
-                  setPausedForActiveWord(autoPauseOnWord && wasPlaying);
-                  if (autoPauseOnWord) {
-                    if (video && wasPlaying) video.pause();
-                    roamAudioRef.current?.pause();
-                  }
+                  speak(activeRoamKorean[w.id] ?? w.italian, "female");
                 }}
               >
-                {w.italian}
+                {activeRoamKorean[w.id] ?? w.italian}
               </button>
             );
           })}
 
       {activeWord && (
-        <div className="roam-word-popup-backdrop" onClick={closeActiveWord}>
+        <div className="roam-word-popup-backdrop">
           <div className="roam-word-popup" onClick={(e) => e.stopPropagation()}>
             <div className="roam-word-popup-header-actions">
               <button
+                type="button"
+                className={`roam-word-popup-romanisation ${roamRomanisationEnabled ? "is-enabled" : ""}`}
+                onClick={toggleRoamRomanisation}
+                aria-pressed={roamRomanisationEnabled}
+              >
+                <span>Romanisation</span><b aria-hidden="true">{roamRomanisationEnabled ? "✓" : ""}</b>
+              </button>
+              <button
                 className="roam-word-popup-pause"
-                onClick={() => {
-                  const v = videoRef.current;
-                  if (!v) return;
-                  if (v.paused) {
-                    v.play();
-                    setIsPlaying(true);
-                    setAutoPauseOnWord(false);
-                    setPausedForActiveWord(false);
-                  } else {
-                    v.pause();
-                    setIsPlaying(false);
-                    setAutoPauseOnWord(true);
-                    setPausedForActiveWord(false);
-                  }
-                }}
+                onClick={toggleRoamPlayback}
               >
                 {isPlaying ? <Pause size={14} /> : <Play size={14} />}
                 {isPlaying
@@ -3953,31 +4903,33 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
               </button>
               <button
                 className="roam-word-popup-close"
-                onClick={closeActiveWord}
+                onClick={() => closeActiveWord()}
               >
                 <X size={16} />
               </button>
             </div>
             <div className="roam-word-popup-eyebrow">
-              {isChinese ? "中文" : "English"}
+              Korean word
             </div>
             <div className="flex items-center gap-2">
-              <h2 className="roam-word-popup-italian">{activeWord.italian}</h2>
+              <h2 className="roam-word-popup-italian"><LiveAnswerLetters target={activeWordKorean} value={/[가-힣]/.test(activeWordInput) ? activeWordInput : ""} neutralClassName="text-inherit" /></h2>
               <button
                 className="text-[#c4942a] transition hover:text-white"
-                onClick={() => speak(activeWord.italian, "female")}
-                title={`Hear ${activeWord.italian} in English`}
-                aria-label={`Hear ${activeWord.italian} in English`}
+                onClick={() => speak(activeWordKorean, "female")}
+                title={`Hear ${activeWord.italian} in Korean`}
+                aria-label={`Hear ${activeWord.italian} in Korean`}
               >
                 <Volume2 size={18} />
               </button>
             </div>
-            <div className="roam-word-popup-english">{activeWord.english}</div>
+            {roamRomanisationEnabled && <p className="roam-word-popup-romanised"><LiveAnswerLetters target={activeWordRomanisation} value={/[a-z]/i.test(activeWordInput) ? activeWordInput : ""} neutralClassName="text-[#f6d46b]" /></p>}
+            <div className="roam-word-popup-english">{capitaliseStandalone(activeWord.italian)}</div>
             <div className="roam-word-popup-divider" />
-            <p className="roam-word-popup-fact">{activeWord.fact}</p>
-            <form onSubmit={(event) => { event.preventDefault(); if (activeWordInput.trim().toLowerCase() !== activeWord.italian.toLowerCase()) return; setSavedWords((words) => words.some((word) => word.id === activeWord.id) ? words : [...words, activeWord]); closeActiveWord(); }} className="mt-4 flex gap-2">
-              <input autoFocus value={activeWordInput} onChange={(event) => setActiveWordInput(event.target.value)} placeholder={`Type ${activeWord.italian} to unlock`} className="min-w-0 flex-1 rounded-lg border border-white/20 bg-black/25 px-3 py-2 text-sm text-white outline-none" />
+            <p className="roam-word-popup-fact">{activeRoamFacts[activeWord.id] ?? activeWord.fact}</p>
+            <form onSubmit={(event) => { event.preventDefault(); const typed = normaliseRoamAnswer(activeWordInput); const isCorrect = typed === normaliseRoamAnswer(activeWordKorean) || (roamRomanisationEnabled && typed === normaliseRoamAnswer(activeWordRomanisation)); if (!isCorrect) return; speak(activeWordKorean, "female", () => { if (!savedWords.some((word) => word.id === activeWord.id)) recordDailyLearnedWords([activeWordKorean]); setSavedWords((words) => words.some((word) => word.id === activeWord.id) ? words : [...words, activeWord]); setUnlockedWordNotice({ korean: activeWordKorean, english: capitaliseStandalone(activeWord.italian) }); closeActiveWord(true); }); }} className="mt-4">
+              <div className="flex gap-2"><input autoFocus value={activeWordInput} onChange={(event) => setActiveWordInput(event.target.value)} placeholder={roamRomanisationEnabled ? "Type the Korean word or Romanisation" : "Type the Korean word to unlock"} className={`min-w-0 flex-1 rounded-lg border bg-black/25 px-3 py-2 text-sm outline-none transition ${activeWordInput.length > 0 && normaliseRoamAnswer(roamInputTarget).startsWith(normaliseRoamAnswer(activeWordInput)) ? "border-green-400 text-green-300" : "border-white/20 text-white"}`} />
               <button className="rounded-lg bg-[#c4942a] px-3 py-2 text-xs font-semibold text-[#1b1208]">Unlock</button>
+              </div>
             </form>
           </div>
         </div>
@@ -4008,10 +4960,11 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
                     className="rounded-lg bg-white/5 px-2.5 py-2"
                   >
                     <span className="block text-sm text-white">
-                      {word.italian}
+                      {(word.id.startsWith("hearst-") ? HEARST_ROAM_KOREAN[word.id] : ROAM_KOREAN[word.id]) ?? word.italian}
                     </span>
+                    {roamRomanisationEnabled && <span className="block text-[10px] font-semibold text-[#f6d46b]">{word.id.startsWith("hearst-") ? HEARST_ROAM_ROMANISATION[word.id] : ROAM_ROMANISATION[word.id]}</span>}
                     <span className="text-[10px] text-white/45">
-                      {word.english}
+                      {word.italian}
                     </span>
                   </div>
                 ))}
@@ -4071,10 +5024,29 @@ const SHOPPING_STOPS = [
   },
 ] as const;
 
-function matchingPrefixLength(answer: string, typed: string) {
-  const mismatch = [...typed].findIndex((letter, index) => answer[index] !== letter);
-  return mismatch === -1 ? typed.length : mismatch;
-}
+const SHOPPING_OUTSIDE_IMAGE = assetUrl("scenes/shop/c1-v3.png");
+const SHOPPING_INSIDE_IMAGE = assetUrl("scenes/shop/c2-v3.png");
+const SHOPPING_SCENE_IMAGES = [
+  SHOPPING_OUTSIDE_IMAGE,
+  SHOPPING_INSIDE_IMAGE,
+  ...SHOPPING_STOPS.map(stop => stop.image),
+  assetUrl("scenes/shop/c9-taking-rose.png"),
+];
+
+const SHOPPING_KOREAN: Record<string, string> = { dinner: "닭고기", water: "물", fruit: "사과" };
+const shoppingKorean = (id: string) => SHOPPING_KOREAN[id] ?? "";
+const SHOPPING_POINT_ENGLISH: Record<string, string> = { dinner: "Dinner", water: "Drinks", fruit: "Fruits" };
+const shoppingPointEnglish = (id: string) => SHOPPING_POINT_ENGLISH[id] ?? "";
+const SHOPPING_ROMANISATION: Record<string, string> = { dinner: "dalgogi", water: "mul", fruit: "sagwa", shop: "gage" };
+const SHOPPING_CHOICE_KOREAN: Record<string, string> = { Water: "물", "Apple juice": "사과 주스", "Coca-Cola": "코카콜라", Chicken: "닭고기", Pizza: "피자", "Fish and chips": "피시 앤 칩스", Apples: "사과", Oranges: "오렌지", Strawberries: "딸기" };
+const SHOPPING_CHOICE_ROMANISATION: Record<string, string> = { Water: "Mul", "Apple juice": "Sagwa juseu", "Coca-Cola": "Kokakolla", Chicken: "Dalgogi", Pizza: "Pija", "Fish and chips": "Pisi aen chipseu", Apples: "Sagwa", Oranges: "Orenji", Strawberries: "Ttalgi" };
+const SHOPPING_DETAIL_KOREAN: Record<string, string> = { dinner: "닭고기", water: "물", fruit: "사과" };
+const SHOPPING_VOCAB_ROMANISATION: Record<string, string> = { shop: "Gage", dinner: "Jeonyeok", drinks: "Eum-ryo", fruit: "Gwa-il", chicken: "Dalgogi", water: "Mul", apples: "Sagwa" };
+const SHOPPING_PAY_TARGET = "계산하다";
+const SHOPPING_PAY_ROMANISATION = "Gyesanhada";
+const SHOPPING_ROSE_NARRATION = "He finds a rose at the counter. This might help him if worse comes to worse.";
+const SHOPPING_PAID_NARRATION = "The groceries and the rose are now safely in the bag.";
+const shoppingChoiceKorean = (choice: string) => SHOPPING_CHOICE_KOREAN[choice] ?? choice;
 
 function startQuietRoadsideAmbience() {
   try {
@@ -4109,7 +5081,7 @@ function ShopTripAdventure({
 }) {
   const overlay = useDebugOverlay();
   const { debugMode, sceneRef, handleSceneMouseMove } = overlay;
-  const { isChinese } = useLanguage();
+  const isChinese = false;
   const [phase, setPhase] = useState<
     | "approach"
     | "word-puzzle"
@@ -4117,9 +5089,11 @@ function ShopTripAdventure({
     | "food-word"
     | "detail-word"
     | "checkout"
-    | "rose"
+    | "payment"
     | "paid"
   >("approach");
+  const shoppingNarratedPhaseRef = useRef<string | null>(null);
+  const [approachDialogVisible, setApproachDialogVisible] = useState(true);
   const [wordInput, setWordInput] = useState("");
   const [wordWrong, setWordWrong] = useState(false);
   const [wordDone, setWordDone] = useState(false);
@@ -4133,33 +5107,27 @@ function ShopTripAdventure({
   const [activeFoodIndex, setActiveFoodIndex] = useState(0);
   const [pickedFoodIds, setPickedFoodIds] = useState<string[]>([]);
   const [foodInput, setFoodInput] = useState("");
+  const [aisleWordStep, setAisleWordStep] = useState<"category" | "item">("item");
   const [foodWrong, setFoodWrong] = useState(false);
   const [detailWordIndex, setDetailWordIndex] = useState(0);
   const [paymentInput, setPaymentInput] = useState("");
   const [paymentWrong, setPaymentWrong] = useState(false);
-  const recordDailyWords = (words: string[]) => {
-    const slot = Number(localStorage.getItem("taletalk_active_save_slot") ?? "1");
-    const day = new Date().toISOString().slice(0, 10);
-    const seenKey = `taletalk-slot-${slot}-daily-word-list-${day}`;
-    const seen = new Set<string>(JSON.parse(localStorage.getItem(seenKey) ?? "[]"));
-    const before = seen.size;
-    words.forEach((word) => seen.add(word.toLowerCase()));
-    if (seen.size === before) return;
-    localStorage.setItem(seenKey, JSON.stringify([...seen]));
-    localStorage.setItem(`taletalk-slot-${slot}-daily-words-${day}`, String(seen.size));
-    const goal = Number(localStorage.getItem(`taletalk-slot-${slot}-daily-word-goal`) ?? 5);
-    const completeKey = `taletalk-slot-${slot}-daily-goal-completed-${day}`;
-    if (seen.size >= goal && localStorage.getItem(completeKey) !== "true") {
-      localStorage.setItem(completeKey, "true");
-      const lastDayKey = `taletalk-slot-${slot}-daily-word-last-complete`;
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const nextStreak = localStorage.getItem(lastDayKey) === yesterday
-        ? Number(localStorage.getItem(`taletalk-slot-${slot}-daily-word-streak`) ?? 0) + 1
-        : 1;
-      localStorage.setItem(`taletalk-slot-${slot}-daily-word-streak`, String(nextStreak));
-      localStorage.setItem(lastDayKey, day);
-    }
+  const [shoppingRomanisationEnabled, setShoppingRomanisationEnabled] = useState(() => localStorage.getItem("taletalk-romanisation-enabled") === "true");
+  useEffect(() => {
+    // This short scene is small enough to decode in full while its first frame
+    // is showing. Rapid answers can therefore never outrun the next aisle.
+    preloadSceneWindow(SHOPPING_SCENE_IMAGES, 0, 12);
+    preloadGeneratedSpeech(SHOPPING_ROSE_NARRATION, "adventure");
+    preloadGeneratedSpeech(SHOPPING_PAID_NARRATION, "adventure");
+    preloadGeneratedSpeech(SHOPPING_PAY_TARGET, "female");
+  }, []);
+  const enterShopInterior = (minimumDelay = 0) => {
+    const delay = new Promise<void>(resolve => window.setTimeout(resolve, minimumDelay));
+    void Promise.all([preloadImage(SHOPPING_INSIDE_IMAGE, "high"), delay]).then(() => {
+      window.requestAnimationFrame(() => setPhase("inside"));
+    });
   };
+  const recordDailyWords = (words: string[]) => recordDailyLearnedWords(words);
   const playShopDoorBell = () => {
     try {
       const context = new AudioContext();
@@ -4184,7 +5152,37 @@ function ShopTripAdventure({
     enabled: speechEnabled,
     toggle: toggleSpeech,
   } = useSpeech();
-  const SHOP_WORD: ShopWordTooltip = { word: "Shop", translation: "商店" };
+  const SHOP_WORD: ShopWordTooltip = { word: "Shop", translation: "가게" };
+  const SHOP_TARGET = "가게";
+  useEffect(() => {
+    if (practiceWord) speak(practiceWord.translation, "female");
+  }, [practiceWord, speak]);
+  const toggleShoppingRomanisation = () => {
+    const enabled = !shoppingRomanisationEnabled;
+    setShoppingRomanisationEnabled(enabled);
+    localStorage.setItem("taletalk-romanisation-enabled", String(enabled));
+    window.dispatchEvent(new CustomEvent("taletalk-romanisation-change", { detail: enabled }));
+  };
+  useEffect(() => { const sync = (event: Event) => setShoppingRomanisationEnabled(Boolean((event as CustomEvent<boolean>).detail)); window.addEventListener("taletalk-romanisation-change", sync); return () => window.removeEventListener("taletalk-romanisation-change", sync); }, []);
+  // Vocabulary repeat buttons must speak immediately from a direct user click.
+  // Use a generated Korean recording first, with the device Korean voice as a fallback.
+  const speakKorean = (word: string) => {
+    const useDeviceVoice = () => {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(word);
+      utterance.lang = "ko-KR";
+      utterance.rate = 0.88;
+      utterance.pitch = 1;
+      const koreanVoice = window.speechSynthesis.getVoices().find((voice) => voice.lang.toLowerCase().startsWith("ko"));
+      if (koreanVoice) utterance.voice = koreanVoice;
+      window.speechSynthesis.speak(utterance);
+    };
+    let hash = 2166136261;
+    for (const character of `ko:${word}`) { hash ^= character.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+    const recording = new Audio(assetUrl(`audio/voices/line-ko-${(hash >>> 0).toString(36)}.mp3`));
+    recording.onerror = useDeviceVoice;
+    recording.play().catch(useDeviceVoice);
+  };
   const saveToVocabulary = (word: string) => {
     const slot = Number(localStorage.getItem("taletalk_active_save_slot") ?? "1");
     const key = `taletalk-slot-${slot}-unlocked-words`;
@@ -4195,6 +5193,7 @@ function ShopTripAdventure({
     const sceneWords = new Set<string>(JSON.parse(localStorage.getItem(sceneKey) ?? "[]"));
     sceneWords.add(word.toLowerCase());
     localStorage.setItem(sceneKey, JSON.stringify([...sceneWords].sort()));
+    recordDailyLearnedWords([word], slot);
     window.dispatchEvent(new Event("taletalk-words-changed"));
   };
 
@@ -4204,6 +5203,18 @@ function ShopTripAdventure({
   }, [phase]);
 
   useEffect(() => {
+    const englishNarration: Partial<Record<typeof phase, string>> = {
+      "word-puzzle": "가게",
+      inside: "The little shop was quiet, almost still. Shelves stood patiently along the walls, packed with the same familiar things they had held a hundred mornings before, along with the faint hum of the lights and the soft click of the door closing behind him.",
+      "food-word": activeFoodIndex === 0 ? "저녁" : activeFoodIndex === 1 ? "음료" : "과일",
+      checkout: SHOPPING_ROSE_NARRATION,
+      paid: SHOPPING_PAID_NARRATION,
+    };
+    const narration = englishNarration[phase];
+    if (shoppingNarratedPhaseRef.current === phase) return;
+    shoppingNarratedPhaseRef.current = phase;
+    if (narration) { speak(narration, /[가-힣]/.test(narration) ? "female" : "adventure"); return; }
+    if (phase === "approach") { speak("The little shop waits quietly at the end of the path, surrounded by flowers and the familiar stillness of the village. He has been here countless times before. Today is no different.", "male"); return; }
     if (phase === "approach") speak("他来到当地商店。点击商店进入。", "male");
     else if (phase === "word-puzzle")
       speak("输入“商店”的英语单词即可进入。", "male");
@@ -4214,14 +5225,7 @@ function ShopTripAdventure({
         `请输入“${SHOPPING_STOPS[activeFoodIndex].chinese}”的英语单词。`,
         "male",
       );
-    else if (phase === "checkout") {
-      speak("输入“支付”的英语单词来完成商店购物。", "male");
-      speak("There is a rose by the counter and you decide to get it for your wife. Type Pay to finish your shopping.", "male");
-    } else if (phase === "rose")
-      speak(
-        "付款后，你看见了玫瑰，也决定把它买下来。",
-        "male",
-      );
+    else if (phase === "payment") speak(SHOPPING_PAY_TARGET, "female");
   }, [phase, activeFoodIndex, speak]);
 
   useEffect(() => {
@@ -4242,8 +5246,9 @@ function ShopTripAdventure({
     e.preventDefault();
     if (
       isSkipAnswer(wordInput) ||
-      stripAccents(wordInput.toLowerCase().trim()) === "shop"
+      stripAccents(wordInput.toLowerCase().trim()) === SHOP_TARGET
     ) {
+      speak(SHOP_TARGET, "female");
       setWordDone(true);
       setUnlockedWords((prev) => {
         const existing = new Set(prev.map((w) => w.word));
@@ -4253,9 +5258,9 @@ function ShopTripAdventure({
       recordDailyWords(["shop"]);
       saveToVocabulary("shop");
       playShopDoorBell();
+      enterShopInterior(1800);
       setTimeout(() => {
         setWordDone(false);
-        setPhase("inside");
       }, 1800);
     } else {
       setWordWrong(true);
@@ -4264,6 +5269,51 @@ function ShopTripAdventure({
   };
 
   const activeFood = SHOPPING_STOPS[activeFoodIndex];
+  const shuffledFoodChoices = useMemo(() => {
+    const choices = [...activeFood.choices];
+    for (let index = choices.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [choices[index], choices[swapIndex]] = [choices[swapIndex], choices[index]];
+    }
+    // The answer used to be first every time. Keep its position genuinely
+    // unpredictable while ensuring this old pattern never returns.
+    if (choices[0] === activeFood.english && choices.length > 1) {
+      const swapIndex = 1 + Math.floor(Math.random() * (choices.length - 1));
+      [choices[0], choices[swapIndex]] = [choices[swapIndex], choices[0]];
+    }
+    return choices;
+  }, [activeFood.id, activeFood.choices, activeFood.english]);
+  const activeFoodKorean = shoppingKorean(activeFood.id);
+  const aisleKorean: Record<string, string> = { dinner: "저녁", water: "음료", fruit: "과일" };
+  const aisleEnglish: Record<string, string> = { dinner: "Dinner", water: "Drinks", fruit: "Fruit" };
+  const aisleRomanisation: Record<string, string> = { dinner: "jeonyeok", water: "eum-ryo", fruit: "gwa-il" };
+  const isAisleCategoryStep = Boolean(aisleKorean[activeFood.id]) && aisleWordStep === "category";
+  const activeFoodTarget = isAisleCategoryStep ? aisleKorean[activeFood.id] : activeFoodKorean;
+  const activeFoodCue = isAisleCategoryStep ? aisleEnglish[activeFood.id] : activeFood.english;
+  const activeFoodRomanisation = isAisleCategoryStep ? aisleRomanisation[activeFood.id] : SHOPPING_ROMANISATION[activeFood.id];
+  useEffect(() => {
+    const replacements: Record<string, string> = {
+      "商店": "가게",
+      "苹果和香蕉": "사과와 바나나",
+      "水": "물",
+      "鸡肉和土豆": "닭고기와 감자",
+      "输入“苹果和香蕉”的英语单词": "Type the Korean word for apples and bananas.",
+      "输入“水”的英语单词": "Type the Korean word for water.",
+      "输入“鸡肉和土豆”的英语单词": "Type the Korean word for chicken and potatoes.",
+      "输入“商店”的英语单词": "Type the Korean word using the keyboard.",
+    };
+    document.querySelectorAll<HTMLElement>(".shop-trip-adventure *").forEach((element) => {
+      if (element.children.length || !element.textContent) return;
+      const replacement = replacements[element.textContent.trim()];
+      if (replacement) element.textContent = replacement;
+      if (phase === "word-puzzle" && element.tagName === "P" && element.textContent.trim() === "가게") {
+        element.textContent = "shop";
+      }
+      if (phase === "food-word" && element.tagName === "P" && element.textContent.trim() === activeFoodKorean) {
+        element.textContent = activeFood.english;
+      }
+    });
+  }, [phase, activeFoodIndex]);
   // Keyboard progression always supplies the correct answer, so a player can
   // read through any scene with the Right Arrow instead of repeatedly clicking.
   useEffect(() => {
@@ -4277,20 +5327,30 @@ function ShopTripAdventure({
             ? words
             : [...words, SHOP_WORD],
         );
-        setPhase("inside");
+        enterShopInterior();
       } else if (phase === "inside") {
         setActiveFoodIndex(
           SHOPPING_STOPS.findIndex((item) => !pickedFoodIds.includes(item.id)),
         );
+        setAisleWordStep("category");
         setFoodInput("");
         setPhase("food-word");
       } else if (phase === "food-word") {
+        if (isAisleCategoryStep) {
+          setUnlockedWords((words) => words.some((word) => word.word === activeFood.italian)
+            ? words
+            : [...words, { word: activeFood.italian, translation: activeFoodTarget }]);
+          saveToVocabulary(activeFood.italian);
+          setFoodInput("");
+          setPhase("detail-word");
+          return;
+        }
         setUnlockedWords((words) =>
-          words.some((w) => w.word === activeFood.italian)
+          words.some((w) => w.word === activeFood.english)
             ? words
             : [
                 ...words,
-                { word: activeFood.italian, translation: activeFood.chinese },
+                { word: activeFood.english, translation: activeFoodKorean },
               ],
         );
         setPhase("detail-word");
@@ -4300,47 +5360,54 @@ function ShopTripAdventure({
         setPhase(
           picked.length === SHOPPING_STOPS.length ? "checkout" : "inside",
         );
-      } else if (phase === "checkout") setPhase("rose");
-      else if (phase === "rose") setPhase("paid");
+      } else if (phase === "checkout") setPhase("payment");
+      else if (phase === "payment") completePayment();
       else if (phase === "paid") onComplete();
     };
     window.addEventListener("keydown", skip);
     return () => window.removeEventListener("keydown", skip);
-  }, [phase, activeFood, pickedFoodIds, onComplete]);
-  const typedFood = stripAccents(foodInput.toLowerCase().trim());
-  const foodPrefixLength = matchingPrefixLength(
-    stripAccents(activeFood.italian.toLowerCase()),
-    typedFood,
-  );
-  const foodHasWrongLetter = typedFood.length > foodPrefixLength;
+  }, [phase, activeFood, pickedFoodIds, onComplete, isAisleCategoryStep]);
+  const compactTaskAnswer = (value: string) => stripAccents(value.toLowerCase().trim()).replace(/[\s\-'’]/g, "");
+  const foodUsesRomanisation = shoppingRomanisationEnabled && /[a-z]/i.test(foodInput);
   const submitFoodWord = (e: React.FormEvent) => {
     e.preventDefault();
     if (
-      stripAccents(foodInput.trim().toLowerCase()) ===
-      stripAccents(activeFood.italian.toLowerCase())
+      compactTaskAnswer(foodInput) === compactTaskAnswer(activeFoodTarget)
+      || (shoppingRomanisationEnabled && compactTaskAnswer(foodInput) === compactTaskAnswer(activeFoodRomanisation))
     ) {
+      if (isAisleCategoryStep) {
+        setUnlockedWords((words) => words.some((word) => word.word === activeFood.italian)
+          ? words
+          : [...words, { word: activeFood.italian, translation: activeFoodTarget }]);
+        recordDailyWords([activeFood.italian]);
+        saveToVocabulary(activeFood.italian);
+        speak(activeFoodTarget, "female", () => {
+          setFoodInput("");
+          setFoodWrong(false);
+          setPhase("detail-word");
+        });
+        return;
+      }
       setUnlockedWords((prev) =>
-        prev.some((word) => word.word === activeFood.italian)
+        prev.some((word) => word.word === activeFood.english)
           ? prev
           : [
               ...prev,
-              { word: activeFood.italian, translation: activeFood.chinese },
+              { word: activeFood.english, translation: activeFoodKorean },
             ],
       );
       setFoodInput("");
-      recordDailyWords([activeFood.italian]);
-      saveToVocabulary(activeFood.italian);
-      setPhase("detail-word");
+      recordDailyWords([activeFood.english]);
+      saveToVocabulary(activeFood.english);
+      speak(activeFoodTarget, "female", () => setPhase("detail-word"));
     } else {
       setFoodWrong(true);
       setTimeout(() => setFoodWrong(false), 1500);
     }
   };
 
-  const detailWords = [activeFood.english.toLowerCase()];
+  const detailWords = [SHOPPING_DETAIL_KOREAN[activeFood.id] ?? activeFood.english.toLowerCase()];
   const detailWord = detailWords[detailWordIndex];
-  const detailPrefixLength = matchingPrefixLength(detailWord, typedFood);
-  const detailHasWrongLetter = typedFood.length > detailPrefixLength;
   const submitDetailWord = (e: React.FormEvent) => {
     e.preventDefault();
     if (stripAccents(foodInput.trim().toLowerCase()) !== detailWord) {
@@ -4349,9 +5416,11 @@ function ShopTripAdventure({
       return;
     }
     if (detailWordIndex < detailWords.length - 1) {
-      setDetailWordIndex((index) => index + 1);
-      setFoodInput("");
-      setFoodWrong(false);
+      speak(detailWord, "female", () => {
+        setDetailWordIndex((index) => index + 1);
+        setFoodInput("");
+        setFoodWrong(false);
+      });
       return;
     }
     setUnlockedWords((prev) => {
@@ -4362,11 +5431,11 @@ function ShopTripAdventure({
             ? ["chicken"]
             : [detailWord];
       const translations: Record<string, string> = {
-        chicken: "鸡肉",
-        potatoes: "土豆",
-        water: "水",
-        apples: "苹果",
-        bananas: "香蕉",
+        chicken: "닭고기",
+        potatoes: "감자",
+        water: "물",
+        apples: "사과",
+        bananas: "바나나",
       };
       return additions.reduce(
         (words, value) =>
@@ -4398,14 +5467,25 @@ function ShopTripAdventure({
     setPickedFoodIds(picked);
     setFoodInput("");
     setDetailWordIndex(0);
-    setPhase(picked.length === SHOPPING_STOPS.length ? "checkout" : "inside");
+    speak(detailWord, "female", () => setPhase(picked.length === SHOPPING_STOPS.length ? "checkout" : "inside"));
   };
 
+  function completePayment() {
+    setPaymentInput("");
+    setPaymentWrong(false);
+    saveToVocabulary(SHOPPING_PAY_TARGET);
+    setUnlockedWords(words => words.some(word => word.word === "Pay")
+      ? words
+      : [...words, { word: "Pay", translation: SHOPPING_PAY_TARGET }]);
+    speak(SHOPPING_PAY_TARGET, "female", () => setPhase("paid"));
+  }
   const submitPayment = (e: React.FormEvent) => {
     e.preventDefault();
-    if (stripAccents(paymentInput.trim().toLowerCase()) === "pay") {
+    const answer = compactTaskAnswer(paymentInput);
+    if (answer === compactTaskAnswer(SHOPPING_PAY_TARGET)
+      || (shoppingRomanisationEnabled && answer === compactTaskAnswer(SHOPPING_PAY_ROMANISATION))) {
       cancel();
-      setPhase("rose");
+      completePayment();
     } else {
       setPaymentWrong(true);
       setTimeout(() => setPaymentWrong(false), 1500);
@@ -4414,23 +5494,24 @@ function ShopTripAdventure({
 
   const image =
     phase === "approach" || phase === "word-puzzle"
-      ? assetUrl("scenes/shop/c1-v3.png")
+      ? SHOPPING_OUTSIDE_IMAGE
       : phase === "inside"
-        ? assetUrl("scenes/shop/c2-v3.png")
-        : phase === "checkout" || phase === "rose" || phase === "paid"
+        ? SHOPPING_INSIDE_IMAGE
+        : phase === "checkout" || phase === "payment" || phase === "paid"
           ? assetUrl("scenes/shop/c9-taking-rose.png")
           : activeFood.image;
-  const typedShopWord = stripAccents(wordInput.toLowerCase().trim());
-  const shopWordPrefixLength = "shop".startsWith(typedShopWord)
-    ? typedShopWord.length
-    : 0;
-
   return (
-    <div className="fixed inset-0 bg-black overflow-hidden flex items-center justify-center">
+    <div className="shop-trip-adventure fixed inset-0 bg-black overflow-hidden flex items-center justify-center">
       <div
         ref={sceneRef}
         className="relative h-screen w-screen"
         onMouseMove={handleSceneMouseMove}
+        onClick={(event) => {
+          if (event.target instanceof HTMLElement && event.target.closest("button,input,form")) return;
+          if (phase === "approach") setApproachDialogVisible(false);
+          else if (phase === "checkout") { cancel(); setPhase("payment"); }
+          else if (phase === "paid") { cancel(); onComplete(); }
+        }}
       >
         <SceneBackground source={image} alt="A trip to the shop" />
         <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/90 pointer-events-none" />
@@ -4466,9 +5547,30 @@ function ShopTripAdventure({
           </div>
         </header>
 
-        {unlockedWords.length > 0 && (
+        {(phase === "inside" || phase === "food-word" || phase === "detail-word") && (
+          <aside className="absolute left-4 top-28 z-30 w-48 rounded-xl border border-[#c4942a]/50 bg-black/80 p-3 text-white shadow-xl" onClick={(event) => event.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between text-sm font-semibold uppercase tracking-wider text-[#c4942a]">
+              <span>Shopping list</span>
+            </div>
+            <div className="mb-2 text-sm text-white/55">3 items</div>
+            <div className="space-y-2">
+              {SHOPPING_STOPS.map((food, itemIndex) => {
+                const picked = pickedFoodIds.includes(food.id);
+                return <div key={food.id} className={`flex items-start justify-between border-t border-white/10 pt-2 ${picked ? "text-green-400" : "text-white"}`}>
+                  <div className={`min-w-0 ${picked ? "line-through decoration-green-400/70" : ""}`}>
+                    <button type="button" onClick={() => speakKorean(shoppingKorean(food.id))} className="flex items-center gap-1 text-xl font-semibold hover:text-[#f6d46b]">{shoppingKorean(food.id)} <Volume2 size={16} /></button>
+                    {shoppingRomanisationEnabled && <span className="block text-sm font-medium text-[#f6d46b]">{capitaliseStandalone(SHOPPING_ROMANISATION[food.id])}</span>}
+                  </div>
+                  {picked ? <Check className="mt-1 shrink-0" size={18} /> : <span className="mt-1 text-lg text-white/35">{itemIndex + 1}</span>}
+                </div>;
+              })}
+            </div>
+          </aside>
+        )}
+
+        {false && unlockedWords.length > 0 && (
           <div
-            className="absolute left-4 top-28 z-30"
+            className="absolute right-4 top-28 z-30"
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -4485,12 +5587,7 @@ function ShopTripAdventure({
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-[#c4942a]">
                     Vocabulary
                   </span>
-                  <button
-                    className="text-white/50 hover:text-white"
-                    onClick={() => setLibraryOpen(false)}
-                  >
-                    ×
-                  </button>
+                  <button className="text-white/50 hover:text-white" onClick={() => setLibraryOpen(false)}>×</button>
                 </div>
                 <div className="space-y-1.5">
                   {[...unlockedWords]
@@ -4503,12 +5600,11 @@ function ShopTripAdventure({
                           setPracticeInput("");
                           setPracticeCorrect(false);
                         }}
-                        className="flex w-full items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-left transition hover:bg-white/10"
+                        className="block w-full rounded-lg bg-white/5 px-2.5 py-2 text-left transition hover:bg-white/10"
                       >
-                        <span className="text-sm text-white">{word.word}</span>
-                        <span className="text-[10px] text-white/45">
-                          {word.translation}
-                        </span>
+                        <span className="block text-sm font-semibold text-white">{word.translation}</span>
+                        {shoppingRomanisationEnabled && <span className="block text-[10px] font-medium text-[#f6d46b]">{SHOPPING_VOCAB_ROMANISATION[word.word.toLowerCase()] ?? capitaliseStandalone(word.word)}</span>}
+                        <span className="block text-xs text-white/55">{capitaliseStandalone(word.word)}</span>
                       </button>
                     ))}
                 </div>
@@ -4523,6 +5619,7 @@ function ShopTripAdventure({
             onClick={() => setPracticeWord(null)}
           >
             <div
+              data-task-editor-panel="shop-trip-word-practice"
               className="w-full max-w-sm rounded-2xl border border-white/15 bg-[#120d08]/95 p-5 shadow-2xl"
               onClick={(e) => e.stopPropagation()}
             >
@@ -4533,7 +5630,7 @@ function ShopTripAdventure({
                 className="text-2xl text-white"
                 style={{ fontFamily: "'Playfair Display', serif" }}
               >
-                {practiceWord.word}
+                <LiveAnswerLetters target={capitaliseStandalone(practiceWord.word)} value={practiceInput} neutralClassName="text-white" />
               </h2>
               <p className="mb-4 text-sm text-white/55">
                 {practiceWord.translation}
@@ -4542,14 +5639,15 @@ function ShopTripAdventure({
                 <p className="mb-4 text-sm text-green-400">
                   Correct. The word is yours.
                 </p>
-              ) : (
+              ) : (<>
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    setPracticeCorrect(
+                    const correct =
                       stripAccents(practiceInput.trim().toLowerCase()) ===
-                        stripAccents(practiceWord.word.toLowerCase()),
-                    );
+                        stripAccents(practiceWord.word.toLowerCase());
+                    setPracticeCorrect(correct);
+                    if (correct) speak(practiceWord.translation, "female");
                   }}
                   className="flex gap-2"
                 >
@@ -4566,7 +5664,7 @@ function ShopTripAdventure({
                     Check
                   </button>
                 </form>
-              )}
+              </>)}
               <button
                 onClick={() => setPracticeWord(null)}
                 className="mt-4 text-xs text-white/50 hover:text-white"
@@ -4605,45 +5703,26 @@ function ShopTripAdventure({
               aria-label="Click on the shop"
             >
               <span className="hotspot-pulse" />
-              <span className="hotspot-tooltip">商店</span>
+              <span className="hotspot-tooltip">Shop</span>
             </button>
-            <div
-              className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div
-                className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-                style={{ background: "rgba(0,0,0,0.92)" }}
-              >
-                <div className="flex items-center gap-2.5 mb-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-[#ccc] flex-shrink-0" />
-                  <span className="text-[11px] uppercase tracking-[0.2em] font-semibold text-white/60">
-                    {isChinese ? "旁白" : "Narrator"}
-                  </span>
-                </div>
-                <p
-                  className="text-white text-base leading-snug"
-                  style={{ fontFamily: "'Playfair Display', serif" }}
-                >
-                  {isChinese
-                    ? "他来到了本地商店。点击商店进入。"
-                    : "He arrives at the local shop. Click on the shop to enter."}
-                </p>
-                <span className="text-white/40 text-[11px]">
-                  {isChinese ? "点击发光点" : "click on the glowing point"}
-                </span>
+            {approachDialogVisible && <div className="story-dialogue-panel absolute z-10" onClick={(e) => { e.stopPropagation(); setApproachDialogVisible(false); }}>
+              <div className="story-dialogue-content">
+                <div className="scene-eyebrow">Narrator</div>
+                <p className="story-dialogue-text">The little shop waits quietly at the end of the path, surrounded by flowers and the familiar stillness of the village. He has been here countless times before. Today is no different.</p>
+                <div className="cop-narration-footer"><span>click on the glowing point</span><button onClick={(event) => { event.stopPropagation(); speak("The little shop waits quietly at the end of the path, surrounded by flowers and the familiar stillness of the village. He has been here countless times before. Today is no different.", "male"); }}><Volume2 size={12} /> Listen</button></div>
               </div>
-            </div>
+            </div>}
           </>
         )}
 
         {phase === "word-puzzle" && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+            data-task-editor-panel="shopping-centre-shop-task"
+            className="shop-task-frame absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
+              className="shop-task-box shared-task-bar-ui rounded-2xl border border-white/10 px-4 pb-3 pt-3"
               style={{ background: "rgba(0,0,0,0.92)" }}
             >
               {wordDone ? (
@@ -4662,35 +5741,31 @@ function ShopTripAdventure({
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center gap-2 mb-2">
+                  <div data-task-editor-item="instruction" className="flex items-center gap-2 mb-2">
                     <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
                     <span
                       className={`text-[#c4942a] uppercase tracking-[0.12em] font-semibold ${isChinese ? "text-xs" : "text-[9px]"}`}
                     >
                       {isChinese
                         ? "输入“商店”的英语单词"
-                        : "Type the English word for shop"}
+                        : "Type the Korean word using the keyboard"}
                     </span>
                   </div>
                   <div
-                    className="mb-2 flex gap-0.5 text-lg font-semibold tracking-[0.24em]"
+                    data-task-editor-item="hangul-cue"
+                    onClick={() => speakKorean(SHOP_TARGET)}
+                    className="mb-1 flex cursor-pointer gap-0.5 text-2xl font-semibold tracking-[0.24em]"
                     aria-label="Shop"
                   >
-                    {"Shop".split("").map((letter, index) => (
-                      <span
-                        key={index}
-                        className={
-                          index < shopWordPrefixLength
-                            ? "text-green-400"
-                            : "text-white/45"
-                        }
-                      >
-                        {letter}
-                      </span>
-                    ))}
+                    <LiveAnswerLetters target={SHOP_TARGET} value={wordInput} neutralClassName="text-white/45" />
+                    <button type="button" onClick={() => speakKorean(SHOP_TARGET)} className="ml-2 inline-flex items-center text-[#f6d46b] hover:text-white" aria-label="Hear 가게">
+                      <Volume2 size={19} />
+                    </button>
                   </div>
-                  <p className="mb-2 text-sm text-white/55">商店</p>
+                  <p data-task-editor-item="english-cue" className="mb-2 text-base text-white/70">Shop</p>
+                  {shoppingRomanisationEnabled && <p data-task-editor-item="romanisation-cue" className="mb-2 text-sm text-[#f6d46b]"><LiveAnswerLetters target="Gage" value={/[a-z]/i.test(wordInput) ? wordInput : ""} neutralClassName="text-[#f6d46b]" /></p>}
                   <form
+                    data-task-editor-item="answer-form"
                     onSubmit={handleSubmit}
                     className="flex items-center gap-2"
                   >
@@ -4700,7 +5775,7 @@ function ShopTripAdventure({
                       autoFocus
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder={isChinese ? "输入 Shop…" : "type Shop..."}
+                      placeholder="Type the Korean word..."
                       className="flex-1 min-w-0 bg-white/5 text-white text-sm outline-none placeholder-white/30 caret-white border-b border-white/20 focus:border-white/60 py-2 rounded-lg px-3"
                     />
                     <button className="rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 hover:border-white/40 text-white text-xs px-4 py-2 transition-all uppercase tracking-wider flex-shrink-0">
@@ -4708,7 +5783,7 @@ function ShopTripAdventure({
                     </button>
                   </form>
                   {wordWrong && (
-                    <div className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
+                    <div data-task-editor-item="error-message" className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
                       <AlertTriangle size={11} /> Not quite — try again
                     </div>
                   )}
@@ -4720,28 +5795,6 @@ function ShopTripAdventure({
 
         {phase === "inside" && (
           <>
-            <div
-              className="absolute left-4 top-28 z-30 w-44 rounded-xl border border-[#c4942a]/50 bg-black/80 p-3 shadow-xl"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-[#c4942a]">
-                Shopping list
-              </div>
-              <div className="mb-2 text-xs text-white/55">3 items</div>
-              {SHOPPING_STOPS.map((food, index) => (
-                <div
-                  key={food.id}
-                  className={`flex items-center justify-between py-1 text-sm ${pickedFoodIds.includes(food.id) ? "text-green-400 line-through" : "text-white"}`}
-                >
-                  <span>{food.english}</span>
-                  {pickedFoodIds.includes(food.id) ? (
-                    <Check size={14} />
-                  ) : (
-                    <span className="text-white/35">{index + 1}</span>
-                  )}
-                </div>
-              ))}
-            </div>
             {SHOPPING_STOPS.filter(
               (food) => !pickedFoodIds.includes(food.id),
             ).map((food) => (
@@ -4756,37 +5809,21 @@ function ShopTripAdventure({
                   setActiveFoodIndex(
                     SHOPPING_STOPS.findIndex((item) => item.id === food.id),
                   );
+                  setAisleWordStep("category");
                   setFoodInput("");
                   setPhase("food-word");
                 }}
                 aria-label={`Explore ${food.english}`}
               >
                 <span className="hotspot-pulse" />
-                <span className="hotspot-tooltip">{food.chinese}</span>
+                <span className="hotspot-tooltip text-base font-semibold">{shoppingPointEnglish(food.id)}</span>
               </button>
             ))}
-            <div
-              className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div
-                className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-                style={{ background: "rgba(0,0,0,0.92)" }}
-              >
-                <div className="flex items-center gap-2.5 mb-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-[#ccc] flex-shrink-0" />
-                  <span className="text-[11px] uppercase tracking-[0.2em] font-semibold text-white/60">
-                    {isChinese ? "旁白" : "Narrator"}
-                  </span>
-                </div>
-                <p
-                  className="text-white text-base leading-snug"
-                  style={{ fontFamily: "'Playfair Display', serif" }}
-                >
-                  {isChinese
-                    ? "他走进了商店。点击每个发光点，找到清单上的物品。"
-                    : "He steps inside the shop. Click each glowing point to find the items on the list."}
-                </p>
+            <div className="story-dialogue-panel absolute z-10" onClick={(e) => e.stopPropagation()}>
+              <div className="story-dialogue-content">
+                <div className="scene-eyebrow">Narrator</div>
+                <p className="story-dialogue-text">The little shop was quiet, almost still. Shelves stood patiently along the walls, packed with the same familiar things they had held a hundred mornings before, along with the faint hum of the lights and the soft click of the door closing behind him.</p>
+                <div className="cop-narration-footer"><span>click on the glowing point</span><button onClick={(event) => { event.stopPropagation(); speak("The little shop was quiet, almost still. Shelves stood patiently along the walls, packed with the same familiar things they had held a hundred mornings before, along with the faint hum of the lights and the soft click of the door closing behind him.", "male"); }}><Volume2 size={12} /> Listen</button></div>
               </div>
             </div>
           </>
@@ -4794,61 +5831,48 @@ function ShopTripAdventure({
 
         {phase === "food-word" && (
           <>
-            <div className="absolute left-4 top-28 z-30 w-44 rounded-xl border border-[#c4942a]/50 bg-black/80 p-3 text-xs text-white">
-              <span className="text-[#c4942a]">Shopping list</span>
-              {SHOPPING_STOPS.map((food) => (
-                <div key={food.id} className={`mt-1 ${pickedFoodIds.includes(food.id) ? "text-green-400 line-through" : "text-white"}`}>
-                  {food.english}
-                </div>
-              ))}
-            </div>
             <div
-              className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+              data-task-editor-panel="shopping-centre-category-task"
+              className="shop-task-frame absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
               onClick={(e) => e.stopPropagation()}
             >
               <div
-                className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
+                className="shop-task-box shared-task-bar-ui rounded-2xl border border-white/10 px-4 pb-3 pt-3"
                 style={{ background: "rgba(0,0,0,0.92)" }}
               >
-                <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">
-                  输入“{activeFood.chinese}”的英语单词
-                </span>
+                <span data-task-editor-item="instruction" className="text-[#c4942a] text-[11px] uppercase tracking-[0.12em] font-semibold">Type the Korean word using the keyboard</span>
                 <p
-                  className={`mt-1 text-sm ${foodHasWrongLetter ? "text-red-400" : foodPrefixLength ? "text-green-400" : "text-white/60"}`}
+                  data-task-editor-item="english-cue"
+                  className="mt-1 text-sm text-white/60"
                 >
-                  {activeFood.chinese}
+                  {capitaliseStandalone(activeFoodCue)}
                 </p>
-                <div className="my-2 flex gap-0.5 text-lg font-semibold tracking-[0.2em]">
-                  {activeFood.italian.split("").map((letter, index) => (
-                    <span
-                      key={index}
-                      className={
-                        index < foodPrefixLength
-                          ? "text-green-400"
-                          : foodHasWrongLetter && index < foodInput.length
-                            ? "text-red-400"
-                            : "text-white/45"
-                      }
-                    >
-                      {letter}
-                    </span>
-                  ))}
+                <div data-task-editor-item="hangul-cue" onClick={() => speakKorean(activeFoodTarget)} className="my-2 flex cursor-pointer gap-0.5 text-2xl font-semibold tracking-[0.2em]">
+                  <LiveAnswerLetters
+                    target={activeFoodTarget}
+                    value={foodUsesRomanisation ? "" : foodInput}
+                    neutralClassName="text-white/45"
+                  />
+                  <button type="button" onClick={() => speakKorean(activeFoodTarget)} className="ml-2 inline-flex items-center text-[#f6d46b] hover:text-white" aria-label={`Hear ${activeFoodTarget}`}>
+                    <Volume2 size={19} />
+                  </button>
                 </div>
-                <form onSubmit={submitFoodWord} className="flex gap-2">
+                {shoppingRomanisationEnabled && <p data-task-editor-item="romanisation-cue" className="mb-2 text-sm"><LiveAnswerLetters target={capitaliseStandalone(activeFoodRomanisation)} value={foodUsesRomanisation ? foodInput : ""} neutralClassName="text-[#f6d46b]" /></p>}
+                <form data-task-editor-item="answer-form" onSubmit={submitFoodWord} className="flex gap-2">
                   <input
                     autoFocus
                     value={foodInput}
                     onChange={(e) => setFoodInput(e.target.value)}
-                    placeholder={`type ${activeFood.italian}...`}
+                    placeholder="Type the Korean word..."
                     className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none"
                   />
                   <button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs text-white">
-                    确认
+                    Enter
                   </button>
                 </form>
                 {foodWrong && (
-                  <p className="mt-2 text-xs text-red-400">
-                    还不对，请再试一次。
+                  <p data-task-editor-item="error-message" className="mt-2 text-xs text-red-400">
+                    Not quite — try again.
                   </p>
                 )}
               </div>
@@ -4858,55 +5882,39 @@ function ShopTripAdventure({
 
         {phase === "detail-word" && (
           <>
-            <div className="absolute left-4 top-28 z-30 w-44 rounded-xl border border-[#c4942a]/50 bg-black/80 p-3 shadow-xl">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-[#c4942a]">
-                Shopping list
-              </div>
-              {SHOPPING_STOPS.map((food) => (
-                <div key={food.id} className="py-1 text-sm text-white/70">
-                  {food.english}
-                </div>
-              ))}
-            </div>
             <div
-              className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+              data-task-editor-panel="shopping-centre-item-task"
+              className="shop-task-frame absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
               onClick={(e) => e.stopPropagation()}
             >
               <div
-                className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
+                className="shop-task-box shared-task-bar-ui rounded-2xl border border-white/10 px-4 pb-3 pt-3"
                 style={{ background: "rgba(0,0,0,0.92)" }}
               >
-                <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">
+                <span data-task-editor-item="instruction" className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">
                   Pick which one is right, then type it
                 </span>
                 <div className="my-2 flex flex-wrap gap-2">
-                  {activeFood.choices.map((choice) => (
-                    <span
+                  {shuffledFoodChoices.map((choice) => (
+                    <button
+                      data-task-editor-item={`choice-${choice.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+                      type="button"
                       key={choice}
-                      className="rounded-full border border-white/20 px-2 py-1 text-xs text-white/60"
+                      onClick={() => speakKorean(shoppingChoiceKorean(choice))}
+                      className="inline-flex min-w-24 flex-col items-center rounded-2xl border border-white/20 px-3 py-2 text-lg text-white/80 hover:border-[#f6d46b] hover:text-[#f6d46b]"
                     >
-                      {choice.split("").map((letter, index) => (
-                        <span
-                          key={index}
-                          className={choice.toLowerCase() !== detailWord ? "" : index < detailPrefixLength ? "text-green-400" : detailHasWrongLetter && index < foodInput.length ? "text-red-400" : ""}
-                        >
-                          {letter}
-                        </span>
-                      ))}
-                    </span>
+                      <span className="inline-flex items-center"><LiveAnswerLetters target={shoppingChoiceKorean(choice)} value="" neutralClassName="text-white/80" /><Volume2 className="ml-1" size={13} /></span>
+                      {shoppingRomanisationEnabled && <small className="mt-1 text-[10px] font-semibold text-[#f6d46b]"><LiveAnswerLetters target={SHOPPING_CHOICE_ROMANISATION[choice]} value="" neutralClassName="text-[#f6d46b]" /></small>}
+                      <small className="mt-1 text-xs font-medium text-white/55">{choice}</small>
+                    </button>
                   ))}
                 </div>
-                <div
-                  className={`mb-2 text-sm ${detailHasWrongLetter ? "text-red-400" : detailPrefixLength ? "text-green-400" : "text-white/45"}`}
-                >
-                  {activeFood.chinese}
-                </div>
-                <form onSubmit={submitDetailWord} className="flex gap-2">
+                <form data-task-editor-item="answer-form" onSubmit={submitDetailWord} className="flex gap-2">
                   <input
                     autoFocus
                     value={foodInput}
                     onChange={(e) => setFoodInput(e.target.value)}
-                    placeholder="type your choice..."
+                    placeholder="Type the Korean word..."
                     className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none"
                   />
                   <button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs text-white">
@@ -4914,7 +5922,7 @@ function ShopTripAdventure({
                   </button>
                 </form>
                 {foodWrong && (
-                  <p className="mt-2 text-xs text-red-400">
+                  <p data-task-editor-item="error-message" className="mt-2 text-xs text-red-400">
                     Not quite — type the whole item.
                   </p>
                 )}
@@ -4924,73 +5932,66 @@ function ShopTripAdventure({
         )}
 
         {phase === "checkout" && (
+          <div className="story-dialogue-panel absolute z-10">
+            <div className="story-dialogue-content">
+              <div className="scene-eyebrow"><span className="cop-narrator-dot" />Narrator</div>
+              <p className="story-dialogue-text">{SHOPPING_ROSE_NARRATION}</p>
+              <div className="cop-narration-footer">
+                <span>click anywhere to continue</span>
+                <button type="button" onClick={(event) => { event.stopPropagation(); speak(SHOPPING_ROSE_NARRATION, "adventure"); }}><Volume2 size={12} /> Listen</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {phase === "payment" && (
           <div
-            className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
+            data-task-editor-panel="shopping-centre-payment-task"
+            className="shop-task-frame absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10"
             onClick={(e) => e.stopPropagation()}
           >
             <div
-              className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
+              className="shop-task-box shared-task-bar-ui rounded-2xl border border-white/10 px-4 pb-3 pt-3"
             >
-              <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">
-                Checkout
+              <button data-task-editor-item="close" type="button" className="task-close" onClick={() => { setPaymentInput(""); setPaymentWrong(false); }}>×</button>
+              <span data-task-editor-item="instruction" className="text-[#c4942a] text-[11px] uppercase tracking-[0.12em] font-semibold">
+                Type the Korean word using the keyboard
               </span>
-              <p className="my-2 text-white">
-                提示：<span className="text-green-400">pay</span>
-              </p>
-              <p className="my-2 text-white">输入“支付”来完成购物。</p>
-              <form onSubmit={submitPayment} className="flex gap-2">
+              <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">Pay</p>
+              <div data-task-editor-item="hangul-cue" className="my-2 flex items-center gap-0.5 text-2xl font-semibold tracking-[0.2em]">
+                <LiveAnswerLetters target={SHOPPING_PAY_TARGET} value={shoppingRomanisationEnabled && /[a-z]/i.test(paymentInput) ? "" : paymentInput} neutralClassName="text-white/45" />
+                <button type="button" onClick={() => speakKorean(SHOPPING_PAY_TARGET)} className="ml-2 inline-flex text-[#f6d46b] hover:text-white" aria-label={`Hear ${SHOPPING_PAY_TARGET}`}><Volume2 size={19} /></button>
+              </div>
+              {shoppingRomanisationEnabled && <p data-task-editor-item="romanisation-cue" className="mb-2 text-sm"><LiveAnswerLetters target={SHOPPING_PAY_ROMANISATION} value={/[a-z]/i.test(paymentInput) ? paymentInput : ""} neutralClassName="text-[#f6d46b]" /></p>}
+              <form data-task-editor-item="answer-form" onSubmit={submitPayment} className="flex gap-2">
                 <input
                   autoFocus
                   value={paymentInput}
                   onChange={(e) => setPaymentInput(e.target.value)}
-                  placeholder="Pay"
+                  placeholder="Type the Korean word..."
                   className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none"
                 />
                 <button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs text-white">
-                  Pay
+                  Enter
                 </button>
               </form>
               {paymentWrong && (
-                <p className="mt-2 text-xs text-red-400">
-                  请输入“pay”。
+                <p data-task-editor-item="error-message" className="mt-2 text-xs text-red-400">
+                  Not quite — try again.
                 </p>
               )}
             </div>
           </div>
         )}
-        {phase === "rose" && (
-          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10">
-            <div
-              className="rounded-2xl border border-white/10 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
-            >
-              <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">
-                旁白
-              </span>
-              <p className="my-2 text-white">
-                付款后，你看见了玫瑰，也决定把它买下来。
-              </p>
-              <button className="scene-action" onClick={() => setPhase("paid")}>购买玫瑰 <ArrowRight size={16} /></button>
-            </div>
-          </div>
-        )}
         {phase === "paid" && (
-          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-10">
-            <div
-              className="rounded-2xl border border-green-400/30 px-4 pb-3 pt-3"
-              style={{ background: "rgba(0,0,0,0.92)" }}
-            >
-              <span className="text-green-400 text-[9px] uppercase tracking-[0.12em] font-semibold">
-                付款成功
-              </span>
-              <p className="my-2 text-white">杂货和玫瑰现在都在篮子里。</p>
-              <button
-                onClick={onComplete}
-                className="rounded-lg border border-green-400/40 bg-green-400/15 px-4 py-2 text-xs text-white"
-              >
-                返回地图
-              </button>
+          <div className="story-dialogue-panel absolute z-10">
+            <div className="story-dialogue-content">
+              <div className="scene-eyebrow"><span className="cop-narrator-dot" />Narrator</div>
+              <p className="story-dialogue-text">{SHOPPING_PAID_NARRATION}</p>
+              <div className="cop-narration-footer">
+                <span>click anywhere to return to the map</span>
+                <button type="button" onClick={(event) => { event.stopPropagation(); speak(SHOPPING_PAID_NARRATION, "adventure"); }}><Volume2 size={12} /> Listen</button>
+              </div>
             </div>
           </div>
         )}
@@ -5011,7 +6012,10 @@ function NavButton({
   const Icon = item.icon;
   const { isChinese } = useLanguage();
   return (
-    <button className={`nav-item ${active ? "active" : ""}`} onClick={onClick}>
+    <button
+      className={`nav-item nav-item-${item.id} ${active ? "active" : ""}`}
+      onClick={onClick}
+    >
       <Icon size={18} />
       <span>
         <strong>{isChinese ? item.labelZh : item.label}</strong>

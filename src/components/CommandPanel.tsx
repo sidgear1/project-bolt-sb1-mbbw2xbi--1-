@@ -5,6 +5,7 @@ import { findClosestCommand, isSkipAnswer, stripAccents } from '../utils/levensh
 import { englishTerm } from '../learningLanguage';
 import { chineseTerm } from '../learningLanguage';
 import { useLanguage } from '../i18n';
+import LiveTypingFeedback, { LiveAnswerLetters } from './LiveTypingFeedback';
 
 interface CommandPanelProps {
   hotspot: HotspotData;
@@ -92,6 +93,7 @@ export default function CommandPanel({ hotspot, phase, playerLevel, dictionary, 
   const inputRef = useRef<HTMLInputElement>(null);
 
   const fullName = englishTerm(hotspot.frenchName);
+  const commandTargets = hotspot.commands.map(command => `${englishTerm(command.verb)} ${fullName}`);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -284,7 +286,7 @@ export default function CommandPanel({ hotspot, phase, playerLevel, dictionary, 
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-30" style={{ maxHeight: '52%' }}>
-      <div className="bg-[#0a0604]/96 border-t border-[#8b6914]/30 backdrop-blur-md">
+      <div data-task-editor-panel={mode === 'name' || mode === 'verb' ? "command-panel" : undefined} className="bg-[#0a0604]/96 border-t border-[#8b6914]/30 backdrop-blur-md">
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-4 pb-2 border-b border-[#8b6914]/20">
           <div className="flex items-baseline flex-wrap gap-x-2">
@@ -296,7 +298,7 @@ export default function CommandPanel({ hotspot, phase, playerLevel, dictionary, 
               <Volume2 size={13} />
             </button>
             <span className="text-[#8b6914]/60 text-xs tracking-widest">{isChinese ? '英语单词' : 'English word'}</span>
-            <span className="text-[#e8d5a3] text-xl font-bold font-display">{toTitleCase(englishTerm(hotspot.frenchName))}</span>
+            <span className="text-[#e8d5a3] text-xl font-bold font-display"><LiveAnswerLetters target={toTitleCase(fullName)} value={mode === 'name' ? input : ''} neutralClassName="text-[#e8d5a3]" /></span>
             <span className="text-[#8b6914]/70 text-xs">[{hotspot.pronunciation}]</span>
             <span className="text-[#d4c090] text-sm">— {toTitleCase(isChinese ? chineseTerm(hotspot.frenchName, hotspot.english) : hotspot.english)}</span>
           </div>
@@ -362,6 +364,7 @@ export default function CommandPanel({ hotspot, phase, playerLevel, dictionary, 
                 <span className="text-[#b09060] ml-1">{isChinese ? '（输入英语动作）' : '(What do you do?)'}</span>
               </span>
               <ChevronRight size={14} className="text-[#c4942a] flex-shrink-0" />
+              <LiveTypingFeedback target={commandTargets[0] ?? `examine ${fullName}`} alternatives={commandTargets.slice(1)} value={input} className="text-sm" />
               <input
                 ref={inputRef}
                 value={input}

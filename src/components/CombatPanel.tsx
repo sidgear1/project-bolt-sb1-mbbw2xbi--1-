@@ -206,7 +206,7 @@ export default function CombatPanel({
         <div className="bg-[#050302]/97 border-t-2 border-red-900/60 backdrop-blur-md">
 
           {/* Combat log */}
-          <div className="px-5 py-3 min-h-[56px] max-h-[80px] overflow-y-auto">
+          <div className="px-5 py-3 min-h-[56px] max-h-[80px] overflow-hidden">
             {combatLog.length === 0 ? (
               <p className="text-[#8b6914]/50 text-xs italic">{isChinese ? '陌生人正在靠近…' : 'The stranger advances toward you...'}</p>
             ) : (

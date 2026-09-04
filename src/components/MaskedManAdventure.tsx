@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { Volume2 } from "lucide-react";
 import { assetUrl } from "../utils/assetUrl";
 import { useSpeech } from "../hooks/useSpeech";
 import CombatPanel from "./CombatPanel";
 import type { PlayerStats } from "./StatsPanel";
+import { LiveAnswerLetters } from "./LiveTypingFeedback";
+import SmoothSceneImage from "./SmoothSceneImage";
+import { preloadSceneWindow } from "../utils/imagePreloader";
 
 type Props = { onBack: () => void; onComplete: () => void };
 
@@ -80,6 +83,10 @@ export function MaskedManAdventure({ onBack, onComplete }: Props) {
   const hasTunnelAmbience = false;
   const hasSceneMusic = index >= scenes.indexOf(battleMusicStartScene);
   const isIntroVideo = scene === "intro-video";
+  useEffect(() => {
+    const imageScenes = scenes.map(item => item === "intro-video" ? "" : assetUrl(`scenes/masked-man/${fullscreenScenes[item] ?? item}`));
+    preloadSceneWindow(imageScenes, index, 12);
+  }, [index]);
 
   useEffect(() => {
     // Entering the chapter must begin silent except for the tunnel bed. This
@@ -256,8 +263,8 @@ export function MaskedManAdventure({ onBack, onComplete }: Props) {
   };
 
   if (!started) return <div className="fixed inset-0 grid place-items-center bg-black p-5 text-center text-white">
-    <main className="max-w-xl space-y-6">
-      <p className="text-xl leading-relaxed text-white/85">A voice in the darkness says: “I've been lost down here for so long, in the memories of the past. I need to return to the light, before I forget myself.”</p>
+    <main data-task-editor-panel="masked-man-light" className="max-w-xl space-y-6">
+      <p className="text-xl leading-relaxed text-white/85">A voice in the darkness says: “I've been lost down here for so long, in the memories of the past. I need to return to the <LiveAnswerLetters target="light" value={answer} neutralClassName="text-white/85" />, before I forget myself.”</p>
       <form onSubmit={begin} className="flex flex-col gap-3 sm:flex-row">
         <input autoFocus value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Type the word..." className="min-w-0 flex-1 rounded-xl border border-white/30 bg-white/10 px-4 py-3 text-center text-lg outline-none focus:border-amber-300" />
         <button className="rounded-xl bg-amber-300 px-5 py-3 font-bold text-slate-950">Enter the light</button>
@@ -270,7 +277,8 @@ export function MaskedManAdventure({ onBack, onComplete }: Props) {
     {isIntroVideo ? (
       <video
         key={scene}
-        src={assetUrl("scenes/masked-man/source/1 intro/masked man.mp4")}
+        src={assetUrl("scenes/masked-man/source/1 intro/masked-man-web.mp4")}
+        preload="auto"
         autoPlay
         playsInline
         controls
@@ -279,15 +287,16 @@ export function MaskedManAdventure({ onBack, onComplete }: Props) {
         className="absolute inset-0 h-full w-full object-contain"
       />
     ) : (
-      <img src={assetUrl(`scenes/masked-man/${fullscreenScenes[scene] ?? scene}`)} alt={`Masked Man scene ${index + 1}`} className={`absolute inset-0 h-full w-full ${fullscreenScenes[scene] ? "object-cover" : "object-contain"}`} />
+      <SmoothSceneImage src={assetUrl(`scenes/masked-man/${fullscreenScenes[scene] ?? scene}`)} alt={`Masked Man scene ${index + 1}`} className={`absolute inset-0 h-full w-full ${fullscreenScenes[scene] ? "object-cover" : "object-contain"}`} />
     )}
     <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-black/35" />
-    <header className="scene-header"><button onClick={onBack}>Map</button><span>Masked Man · {index + 1}/{scenes.length}</span></header>
-    {!inCombat && !isIntroVideo && <main className="absolute bottom-0 left-1/2 w-full max-w-3xl -translate-x-1/2 p-5 text-center md:p-8">
-      {lines[scene] && <p className="mb-4 text-lg font-medium leading-relaxed text-white md:text-2xl">{lines[scene]}</p>}
-      <button onClick={advance} className="inline-flex items-center gap-2 rounded-xl bg-amber-300 px-5 py-3 font-bold text-slate-950 shadow-lg hover:bg-amber-200">
-        {index === scenes.length - 1 ? "Return to the map" : <>Continue <ArrowRight size={19} /></>}
-      </button>
+    <header className="scene-header"><button onClick={onBack}>Map</button></header>
+    {!inCombat && !isIntroVideo && <main className="story-dialogue-panel absolute z-10 cursor-pointer" onClick={advance}>
+      <div className="story-dialogue-content">
+        <div className="scene-eyebrow">Narrator</div>
+        {lines[scene] && <p className="story-dialogue-text">{lines[scene]}</p>}
+        <div className="cop-narration-footer"><span>{index === scenes.length - 1 ? "click anywhere to return to the map" : "click anywhere to continue"}</span><button onClick={event => { event.stopPropagation(); speak(lines[scene] ?? "", "adventure"); }}><Volume2 size={12} /> Listen</button></div>
+      </div>
     </main>}
     {inCombat && <CombatPanel combatPhase={combatPhase as Exclude<CombatPhase, "none">} playerHp={playerHp} playerMaxHp={PLAYER_MAX_HP} enemyHp={enemyHp} enemyMaxHp={ENEMY_MAX_HP} combatLog={combatLog} stats={{ ...PLAYER_STATS, currentHp: playerHp }} onAttack={attack} onParry={parry} parryReady={parryReady} />}
   </div>;

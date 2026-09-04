@@ -211,7 +211,7 @@ export default function WordUnlockPuzzle({
 
   return (
     <div className="absolute bottom-0 left-0 right-0 z-30" style={{ maxHeight: '60%' }}>
-      <div className="bg-[#0a0604]/96 border-t border-[#8b6914]/30 backdrop-blur-md">
+      <div data-task-editor-panel="paris-word-unlock" className="bg-[#0a0604]/96 border-t border-[#8b6914]/30 backdrop-blur-md">
         <div className="flex items-center justify-between px-5 pt-4 pb-2 border-b border-[#8b6914]/20">
           {puzzleIndex === 0 ? (
             <div className="flex items-center gap-3 flex-wrap">

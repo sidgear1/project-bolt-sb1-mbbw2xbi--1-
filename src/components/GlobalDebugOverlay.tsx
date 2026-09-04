@@ -59,7 +59,7 @@ export default function GlobalDebugOverlay() {
   };
 
   return createPortal(
-    <div style={{ position: 'fixed', inset: 0, zIndex: 2147483646, cursor: 'crosshair' }} onMouseMove={event => setCursor(position(event))} onClick={event => setPoints(current => [...current, position(event)])}>
+    <div data-global-debug-overlay style={{ position: 'fixed', inset: 0, zIndex: 2147483646, cursor: 'crosshair' }} onMouseMove={event => setCursor(position(event))} onClick={event => setPoints(current => [...current, position(event)])}>
       <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
         {box && <div style={{ position: 'absolute', left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, border: '2px dashed #facc15', background: 'rgba(250,204,21,.1)' }}><span style={{ position: 'absolute', bottom: '100%', left: 0, background: '#facc15', color: '#111', padding: '3px 6px', font: '700 12px ui-monospace, monospace', whiteSpace: 'nowrap' }}>x:{box.x} y:{box.y} w:{box.w} h:{box.h}</span></div>}
         {points.map((point, index) => <span key={`${point.x}-${point.y}-${index}`} style={{ position: 'absolute', left: `${point.x}%`, top: `${point.y}%`, transform: 'translate(-50%, -50%)', display: 'grid', placeItems: 'center', width: 24, height: 24, borderRadius: '50%', background: '#facc15', border: '2px solid #111', color: '#111', font: '800 11px ui-monospace, monospace' }}>{index + 1}</span>)}

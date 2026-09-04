@@ -18,6 +18,8 @@ import ParisStreetScene from '../ParisStreetScene';
 import { englishTerm } from '../../learningLanguage';
 import { useLanguage } from '../../i18n';
 import { assetUrl } from '../../utils/assetUrl';
+import SmoothSceneImage from '../SmoothSceneImage';
+import { scheduleIdleImagePreload } from '../../utils/imagePreloader';
 
 type CombatPhaseType = 'none' | 'intro' | 'player_turn' | 'enemy_turn' | 'victory' | 'cleared';
 
@@ -502,6 +504,14 @@ export default function Game({
     return areaB - areaA;
   });
   const currentImage = sceneImage(phase, combatPhase);
+  useEffect(() => scheduleIdleImagePreload([
+    assetUrl('cafe_room.png'),
+    assetUrl('ChatGPT_Image_Jun_14,_2026,_05_36_59_PM.png'),
+    assetUrl('man_in_g.png'),
+    assetUrl('man_in_g_on_floor.png'),
+    assetUrl('Use_AI_Image_Jun_15,_2026,_19_20_35.png'),
+    assetUrl('Gemini_Generated_Image_a625ema625ema625.png'),
+  ].filter(source => source !== currentImage)), [currentImage]);
   const levelProgress = getLevelProgress(xp);
   const inCombat = combatPhase === 'intro' || combatPhase === 'player_turn' || combatPhase === 'enemy_turn' || combatPhase === 'victory';
   const playerStats = computeStats(currentLevel, playerHp);
@@ -514,11 +524,10 @@ export default function Game({
         onMouseMove={handleSceneMouseMove}
       >
         {/* Scene image */}
-        <img
-          key={currentImage}
+        <SmoothSceneImage
           src={currentImage}
           alt="Florentine café scene"
-          className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none transition-opacity duration-700"
+          className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
           draggable={false}
         />
 

@@ -4,6 +4,7 @@ import { TextSegment, DictionaryWord } from '../types';
 import { isSkipAnswer, stripAccents } from '../utils/levenshtein';
 import { chineseTerm, englishTerm } from '../learningLanguage';
 import { useLanguage } from '../i18n';
+import { LiveAnswerLetters } from './LiveTypingFeedback';
 
 interface NarrativeBoxProps {
   text: string;
@@ -107,7 +108,7 @@ function FrenchWordSpan({ french, english, visible, locked, isFirstEncounter, on
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
-        {englishTerm(french)}
+        <LiveAnswerLetters target={englishTerm(french)} value={learning ? learnInput : ''} neutralClassName="text-inherit" />
       </span>
       {onSpeak && (
         <button
@@ -268,22 +269,19 @@ export default function NarrativeBox({
 
   return (
     <div
-      className="absolute top-16 left-1/2 -translate-x-1/2 z-20 w-full max-w-2xl px-4 cursor-pointer"
+      className="story-dialogue-panel absolute z-20 cursor-pointer"
       onClick={handleClick}
       title={animating ? 'Click to skip' : 'Click to dismiss'}
     >
-      <div className="bg-[#0a0604]/92 border border-[#8b6914]/30 rounded-2xl px-5 py-4 shadow-2xl backdrop-blur-sm">
-        <p className="text-[#f0e8d8] text-sm leading-relaxed whitespace-pre-line">
+      <div className="story-dialogue-content">
+        <div className="scene-eyebrow">Narrator</div>
+        <p className="story-dialogue-text whitespace-pre-line">
           {renderedNodes}
           {animating && (
             <span className="inline-block w-0.5 h-4 bg-[#c4942a] ml-0.5 animate-pulse align-middle" />
           )}
         </p>
-        {!animating && (
-          <p className="text-[#b09060] text-xs mt-2 text-right">
-            {isChinese ? '点击继续' : 'click to dismiss'}
-          </p>
-        )}
+        <div className="cop-narration-footer"><span>{animating ? (isChinese ? '点击跳过文字动画' : 'click to skip text animation') : (isChinese ? '点击任意位置继续' : 'click anywhere to continue')}</span>{onSpeak && <button onClick={(event) => { event.stopPropagation(); onSpeak(text); }}><Volume2 size={12} /> {isChinese ? '听发音' : 'Listen'}</button>}</div>
       </div>
     </div>
   );

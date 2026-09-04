@@ -11,8 +11,8 @@ interface LanguageContextValue {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [language, setLanguage] = useState<DisplayLanguage>('zh');
-  const toggleLanguage = () => setLanguage(current => current === 'zh' ? 'en' : 'zh');
+  const [language, setLanguage] = useState<DisplayLanguage>('en');
+  const toggleLanguage = () => setLanguage('en');
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {

@@ -9,6 +9,7 @@ import FemmeDuMarcheDialogue from './FemmeDuMarcheDialogue';
 import { englishTerm } from '../learningLanguage';
 import { useLanguage } from '../i18n';
 import { assetUrl } from '../utils/assetUrl';
+import SmoothSceneImage from './SmoothSceneImage';
 
 interface ParisStreetSceneProps {
   playerLevel: number;
@@ -187,7 +188,7 @@ export default function ParisStreetScene({
         onMouseMove={handleSceneMouseMove}
       >
         {/* Scene image */}
-        <img
+        <SmoothSceneImage
           src={assetUrl('Gemini_Generated_Image_a625ema625ema625.png')}
           onError={(e) => { (e.target as HTMLImageElement).src = 'https://images.pexels.com/photos/8248092/pexels-photo-8248092.jpeg?auto=compress&cs=tinysrgb&w=1920'; (e.target as HTMLImageElement).onerror = null; }}
           alt="Florence street"
@@ -402,17 +403,17 @@ export default function ParisStreetScene({
         {/* Narrator / Narrative box — like Scene 1 */}
         {narrative && !activePanel && (
           <div
-            className="absolute top-16 left-1/2 -translate-x-1/2 z-20 w-full max-w-2xl px-4 cursor-pointer"
+            className="story-dialogue-panel absolute z-20 cursor-pointer"
             onClick={() => setNarrative(null)}
           >
-            <div className="bg-[#0a0604]/92 border border-[#8b6914]/30 rounded-2xl px-5 py-4 shadow-2xl backdrop-blur-sm">
+            <div className="story-dialogue-content">
               {/* Speaker header — narrator */}
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: '#a08060' }} />
-                <span className="text-[#a08060] text-xs uppercase tracking-widest font-medium">Narrator</span>
+              <div className="scene-eyebrow">
+                <div className="cop-narrator-dot" />
+                <span>Narrator</span>
               </div>
-              <p className="text-[#f0e8d8] text-sm leading-relaxed" style={{ fontStyle: 'italic' }}>{narrative}</p>
-              <p className="text-[#b09060] text-xs mt-2 text-right">click to dismiss</p>
+              <p className="story-dialogue-text">{narrative}</p>
+              <div className="cop-narration-footer"><span>click anywhere to continue</span><button onClick={(event) => { event.stopPropagation(); speak(narrative, 'male'); }}><Volume2 size={12} /> Listen</button></div>
             </div>
           </div>
         )}

@@ -1,4 +1,4 @@
-export type GamePhase = 'tied' | 'has_knife' | 'freed' | 'has_key' | 'escaped' | 'flashback' | 'paris_street';
+export type GamePhase = 'tied' | 'has_knife' | 'freed' | 'has_key' | 'escaped' | 'flashback' | 'cat_7' | 'cat_8' | 'cat_9' | 'cat_10' | 'cat_10a' | 'cat_11' | 'cat_12' | 'cat_13' | 'cat_14' | 'cat_15' | 'cat_17' | 'cat_18' | 'cat_19' | 'cat_20' | 'cat_21' | 'cat_22' | 'cat_23' | 'cat_24' | 'cat_25' | 'paris_street';
 export type Screen = 'menu' | 'game';
 
 export interface CommandEffect {

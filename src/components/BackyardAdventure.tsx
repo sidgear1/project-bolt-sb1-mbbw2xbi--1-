@@ -1,9 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Volume2, VolumeX, ArrowRight, Check, AlertTriangle, Sparkles } from 'lucide-react';
-import { useSpeech } from '../hooks/useSpeech';
+import { preloadGeneratedSpeech, useSpeech } from '../hooks/useSpeech';
 import { isSkipAnswer, stripAccents } from '../utils/levenshtein';
 import { useLanguage } from '../i18n';
 import { assetUrl } from '../utils/assetUrl';
+import { capitaliseStandalone } from '../utils/textCase';
+import { recordDailyLearnedWords } from '../utils/learningProgress';
+import { LiveAnswerLetters } from './LiveTypingFeedback';
+import SmoothSceneImage from './SmoothSceneImage';
+import { preloadSceneWindow } from '../utils/imagePreloader';
 
 interface Scene {
   image: string;
@@ -59,9 +64,9 @@ const SCENES: Scene[] = [
     image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Josh',
     speakerType: 'narrator',
-    text: 'Bella?',
+    text: '벨라?',
     textZh: '贝拉？',
-    spoken: 'Bella?',
+    spoken: '벨라?',
   },
   {
     image: assetUrl('scenes/bella/a5.png'),
@@ -83,17 +88,17 @@ const SCENES: Scene[] = [
     image: assetUrl('scenes/bella/a5.png'),
     speaker: 'Bella',
     speakerType: 'girl',
-    text: 'I am unhappy.',
-    textZh: '我不开心。',
-    spoken: 'I am unhappy.',
+    text: '저는 슬퍼요.',
+    textZh: 'I am unhappy.',
+    spoken: '저는 슬퍼요.',
   },
 ];
 
-interface WordTooltip { word: string; translation: string; }
+interface WordTooltip { word: string; translation: string; explanation: string; }
 
 const GIRL_WORDS: WordTooltip[] = [
-  { word: 'I am', translation: '我是' },
-  { word: 'unhappy', translation: '不开心' },
+  { word: '저는', translation: 'I am', explanation: 'A polite topic form meaning “I am”.' },
+  { word: '슬퍼요', translation: 'unhappy', explanation: 'A polite Korean adjective meaning “I am unhappy” or “I am sad”.' },
 ];
 
 interface ChoiceOption {
@@ -110,14 +115,14 @@ interface ChoiceOption {
 const CHOICES: ChoiceOption[] = [
   {
     id: 'gelato',
-    italianLabel: 'ice cream?',
-    englishLabel: '你想要冰淇淋吗？',
-    prompt: 'ice cream?',
+    italianLabel: '아이스크림?',
+    englishLabel: 'Would you like ice cream?',
+    prompt: '아이스크림?',
     correct: true,
-    responseIt: 'Okay!',
-    responseEn: '她笑了，擦去眼泪。',
+    responseIt: '네',
+    responseEn: 'She smiles and wipes away her tears.',
     wordTooltips: [
-      { word: 'ice cream?', translation: '冰淇淋' },
+      { word: '아이스크림?', translation: 'ice cream?', explanation: 'The Korean word for “ice cream”.' },
     ],
   },
 ];
@@ -127,7 +132,8 @@ interface Props {
   onComplete: () => void;
 }
 
-const STAND_UP_WORD: WordTooltip = { word: 'stand up', translation: '起身' };
+const STAND_UP_WORD: WordTooltip = { word: '일어서다', translation: 'stand up', explanation: 'A Korean verb meaning “to stand up”.' };
+const NE_WORD: WordTooltip = { word: '네', translation: 'Yes / OK', explanation: 'A polite Korean response meaning “yes” or “OK”.' };
 
 function stopGardenAmbience() {
   document.querySelectorAll<HTMLAudioElement>('audio[data-garden-ambience="true"]').forEach(audio => {
@@ -137,35 +143,52 @@ function stopGardenAmbience() {
 }
 
 const SONO_INFELICE_WORDS: WordTooltip[] = [
-  { word: 'I am', translation: '我是' },
-  { word: 'unhappy', translation: '不开心' },
+  { word: '저는', translation: 'I am', explanation: 'A polite topic form meaning “I am”.' },
+  { word: '슬퍼요', translation: 'unhappy', explanation: 'A polite Korean adjective meaning “I am unhappy” or “I am sad”.' },
 ];
 
 export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   const { isChinese } = useLanguage();
   const [sceneIndex, setSceneIndex] = useState(0);
-  const [visibleSceneImage, setVisibleSceneImage] = useState(SCENES[0].image);
   const [showWordPuzzle, setShowWordPuzzle] = useState(false);
+  const [showFirstTaskTutorial, setShowFirstTaskTutorial] = useState(false);
   const [showStandUpPuzzle, setShowStandUpPuzzle] = useState(false);
   const [standUpInput, setStandUpInput] = useState('');
   const [standUpWrong, setStandUpWrong] = useState(false);
   const [wordPuzzleInput, setWordPuzzleInput] = useState('');
   const [wordPuzzleWrong, setWordPuzzleWrong] = useState(false);
   const [wordPuzzleDone, setWordPuzzleDone] = useState(false);
+  const [showWordPuzzleRomanisation, setShowWordPuzzleRomanisation] = useState(() => localStorage.getItem('taletalk-romanisation-enabled') === 'true');
+  useEffect(() => { const syncRomanisation = (event: Event) => setShowWordPuzzleRomanisation(Boolean((event as CustomEvent<boolean>).detail)); window.addEventListener('taletalk-romanisation-change', syncRomanisation); return () => window.removeEventListener('taletalk-romanisation-change', syncRomanisation); }, []);
   const [showChoices, setShowChoices] = useState(false);
   const [showWorried, setShowWorried] = useState(false);
   const [typingInput, setTypingInput] = useState('');
   const [typingWrong, setTypingWrong] = useState(false);
   const [chosenOption, setChosenOption] = useState<ChoiceOption | null>(null);
   const [speakingChoice, setSpeakingChoice] = useState<ChoiceOption | null>(null);
-  const [hoveredWord, setHoveredWord] = useState<number | null>(null);
-  const [clickedWord, setClickedWord] = useState<number | null>(null);
-  const [hoveredChoiceWord, setHoveredChoiceWord] = useState<string | null>(null);
-  const [clickedChoiceWord, setClickedChoiceWord] = useState<string | null>(null);
+  const [showNeTask, setShowNeTask] = useState(false);
+  const [neInput, setNeInput] = useState('');
+  const [neWrong, setNeWrong] = useState(false);
   const [unlockedWords, setUnlockedWords] = useState<WordTooltip[]>([]);
   const [wordLibraryOpen, setWordLibraryOpen] = useState(false);
   const [wordLibraryTutorial, setWordLibraryTutorial] = useState(false);
   const [practiceWord, setPracticeWord] = useState<WordTooltip | null>(null);
+  useEffect(() => {
+    if (!unlockedWords.length) return;
+    const slot = Number(localStorage.getItem('taletalk_active_save_slot') ?? '1');
+    const sceneKey = `taletalk-slot-${slot}-scene-backyard-words`;
+    const globalKey = `taletalk-slot-${slot}-unlocked-words`;
+    const sceneWords = new Set<string>(JSON.parse(localStorage.getItem(sceneKey) ?? '[]'));
+    const globalWords = new Set<string>(JSON.parse(localStorage.getItem(globalKey) ?? '[]'));
+    unlockedWords.forEach(word => {
+      sceneWords.add(word.word.toLowerCase());
+      globalWords.add(word.word.toLowerCase());
+    });
+    localStorage.setItem(sceneKey, JSON.stringify([...sceneWords].sort()));
+    localStorage.setItem(globalKey, JSON.stringify([...globalWords].sort()));
+    recordDailyLearnedWords(unlockedWords.map(word => word.word), slot);
+    window.dispatchEvent(new Event('taletalk-words-changed'));
+  }, [unlockedWords]);
   const [practiceInput, setPracticeInput] = useState('');
   const [practiceCorrect, setPracticeCorrect] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
@@ -176,9 +199,25 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   const { speak, cancel, enabled: speechEnabled, toggle: toggleSpeech } = useSpeech();
   const keyBufferRef = useRef('');
 
-  // Fetch every scene before the player can advance, avoiding black frames on slower hosts.
+  // Keep nearby frames ready without making every scene compete for bandwidth.
   useEffect(() => {
-    SCENES.forEach(scene => { const image = new Image(); image.src = scene.image; });
+    preloadSceneWindow(
+      [...SCENES.map(scene => scene.image), assetUrl('scenes/bella/a6.png')],
+      sceneIndex,
+      12,
+    );
+  }, [sceneIndex]);
+
+  useEffect(() => {
+    SCENES.forEach(scene => {
+      const voice = scene.speakerType === 'girl' ? 'bella' : scene.speaker === 'Josh' ? 'josh' : 'male';
+      preloadGeneratedSpeech(scene.spoken ?? scene.text, voice);
+      if (scene.speaker === 'Narrator' && scene.textZh) preloadGeneratedSpeech(scene.textZh, 'male');
+    });
+    preloadGeneratedSpeech('Worried, he tries to think of something else.', 'adventure');
+    preloadGeneratedSpeech('他很担心，努力想别的办法。', 'adventure');
+    preloadGeneratedSpeech('아이스크림?', 'josh');
+    preloadGeneratedSpeech('네', 'bella');
   }, []);
 
   // Only the “gets up” narration plays the full movement. The frames are
@@ -224,12 +263,12 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
   }, [cancel]);
 
   useEffect(() => {
-    if (!chosenOption && !showChoices && !showWordPuzzle && !showStandUpPuzzle && !showWorried) return;
+    if (!chosenOption && !showChoices && !showWordPuzzle && !showStandUpPuzzle && !showWorried && !showNeTask) return;
     if (chosenOption?.correct) {
       setShowWordPuzzle(false);
       setShowWorried(false);
     }
-  }, [chosenOption, showChoices, showWordPuzzle, showStandUpPuzzle, showWorried]);
+  }, [chosenOption, showChoices, showWordPuzzle, showStandUpPuzzle, showWorried, showNeTask]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -266,21 +305,19 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
   const currentScene = SCENES[sceneIndex];
 
-  // Never remove the current art until the next scene has decoded. This keeps
-  // scene one smooth even on slower devices and prevents a coloured blank flash.
+  const dismissFirstTaskTutorial = useCallback(() => {
+    const slot = Number(localStorage.getItem('taletalk_active_save_slot') ?? '1');
+    localStorage.setItem(`taletalk-slot-${slot}-first-task-tutorial-seen`, 'true');
+    setShowFirstTaskTutorial(false);
+  }, []);
+
   useEffect(() => {
-    if (currentScene.image === visibleSceneImage) return;
-    let active = true;
-    const image = new Image();
-    const reveal = async () => {
-      try { await image.decode(); } catch { /* it can still be painted */ }
-      if (active) setVisibleSceneImage(currentScene.image);
-    };
-    image.onload = reveal;
-    image.onerror = reveal;
-    image.src = currentScene.image;
-    return () => { active = false; };
-  }, [currentScene.image, visibleSceneImage]);
+    if (!showWordPuzzle || wordPuzzleDone) return;
+    const slot = Number(localStorage.getItem('taletalk_active_save_slot') ?? '1');
+    if (localStorage.getItem(`taletalk-slot-${slot}-first-task-tutorial-seen`) !== 'true') {
+      setShowFirstTaskTutorial(true);
+    }
+  }, [showWordPuzzle, wordPuzzleDone]);
 
   const speakScene = useCallback((scene: Scene) => {
     // Narration follows the selected language. The learning dialogue spoken
@@ -289,16 +326,15 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
     const dialogue = characterSpeaksEnglish ? (scene.spoken ?? scene.text) : (isChinese ? (scene.textZh ?? scene.spoken ?? scene.text) : (scene.spoken ?? scene.text));
     if (scene.speakerType === 'girl') {
       speak(dialogue, 'bella');
+    } else if (scene.speaker === 'Josh') {
+      speak(dialogue, 'josh');
     } else {
       speak(dialogue, 'male');
     }
   }, [isChinese, speak]);
 
   useEffect(() => {
-    // Let the new art paint before the narration begins, preventing speech
-    // from starting while the previous scene is still visible.
-    const timer = window.setTimeout(() => speakScene(currentScene), 320);
-    return () => window.clearTimeout(timer);
+    speakScene(currentScene);
   }, [sceneIndex, speakScene, isChinese]);
 
   useEffect(() => {
@@ -334,12 +370,21 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
     }
   }, [sceneIndex, cancel]);
 
+  const finishSpeakingChoice = useCallback(() => {
+    setSpeakingChoice(null);
+    setNeInput('');
+    setShowNeTask(true);
+  }, []);
+
   useEffect(() => {
     const skip = (event: KeyboardEvent) => {
       if (event.key !== 'ArrowRight') return;
       event.preventDefault();
+      if (showFirstTaskTutorial) { dismissFirstTaskTutorial(); return; }
+      if (speakingChoice) { cancel(); finishSpeakingChoice(); return; }
+      if (showNeTask) { completeNeTask(); return; }
       if (chosenOption) { if (chosenOption.correct) onComplete(); else onMenu(); return; }
-      if (showChoices) { setChosenOption(CHOICES.find(choice => choice.correct) ?? null); return; }
+      if (showChoices) { handleChoiceSubmit(true); return; }
       if (showWordPuzzle) { setShowWordPuzzle(false); setShowChoices(true); return; }
       if (showStandUpPuzzle) { completeStandUp(); return; }
       if (showWorried) { setShowWorried(false); setShowChoices(true); return; }
@@ -347,13 +392,13 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
     };
     window.addEventListener('keydown', skip);
     return () => window.removeEventListener('keydown', skip);
-  }, [advance, chosenOption, completeStandUp, showChoices, showWordPuzzle, showStandUpPuzzle, showWorried, onComplete, onMenu]);
+  }, [advance, chosenOption, completeStandUp, dismissFirstTaskTutorial, finishSpeakingChoice, speakingChoice, showChoices, showFirstTaskTutorial, showWordPuzzle, showStandUpPuzzle, showWorried, showNeTask, onComplete, onMenu, cancel]);
 
   // Word puzzle: type "sono infelice"
-  const wordPuzzleTarget = 'i am unhappy';
+  const wordPuzzleTarget = '저는 슬퍼요';
 
   const getWordPuzzleMatchState = () => {
-    const words = SONO_INFELICE_WORDS.map(w => stripAccents(w.word.toLowerCase()));
+    const words = /[a-z]/i.test(wordPuzzleInput) ? ['jeoneun', 'seulpeoyo'] : SONO_INFELICE_WORDS.map(w => stripAccents(w.word.toLowerCase()));
     const target = words.join(' ');
     const typed = stripAccents(wordPuzzleInput.toLowerCase().replace(/\s+/g, ' ').trim());
     let totalMatched = 0;
@@ -374,14 +419,14 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
   const handleWordPuzzleSubmit = () => {
     const normalized = stripAccents(wordPuzzleInput.toLowerCase().trim());
-    if (isSkipAnswer(wordPuzzleInput) || normalized === stripAccents(wordPuzzleTarget)) {
+    if (isSkipAnswer(wordPuzzleInput) || normalized === stripAccents(wordPuzzleTarget) || normalized === 'jeoneun seulpeoyo') {
       setWordPuzzleDone(true);
       setUnlockedWords(previous => {
         const existing = new Set(previous.map(word => word.word));
         return [...previous, ...SONO_INFELICE_WORDS.filter(word => !existing.has(word.word))];
       });
       setWordLibraryTutorial(true);
-      speak('I am unhappy', 'bella');
+      speak('저는 슬퍼요', 'bella');
       setWordPuzzleInput('');
       setTimeout(() => {
         setShowWordPuzzle(false);
@@ -405,10 +450,46 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
     completeStandUp();
   };
 
-  const handleChoiceSubmit = () => {
+  useEffect(() => {
+    if (showChoices) speak('아이스크림?', 'josh');
+  }, [showChoices, speak]);
+
+  useEffect(() => {
+    if (showNeTask) speak('네', 'bella');
+  }, [showNeTask, speak]);
+
+  const completeNeTask = () => {
+    const normalized = neInput.trim().toLowerCase();
+    if (!isSkipAnswer(neInput) && normalized !== '네' && normalized !== 'ne') {
+      setNeWrong(true);
+      return;
+    }
+    const slot = Number(localStorage.getItem('taletalk_active_save_slot') ?? '1');
+    const globalKey = `taletalk-slot-${slot}-unlocked-words`;
+    const globalWords = new Set<string>(JSON.parse(localStorage.getItem(globalKey) ?? '[]'));
+    globalWords.add(NE_WORD.word);
+    localStorage.setItem(globalKey, JSON.stringify([...globalWords].sort()));
+    const sceneKey = `taletalk-slot-${slot}-scene-backyard-words`;
+    const sceneWords = new Set<string>(JSON.parse(localStorage.getItem(sceneKey) ?? '[]'));
+    sceneWords.add(NE_WORD.word);
+    localStorage.setItem(sceneKey, JSON.stringify([...sceneWords].sort()));
+    recordDailyLearnedWords([NE_WORD.word], slot);
+    window.dispatchEvent(new Event('taletalk-words-changed'));
+    setUnlockedWords(previous => previous.some(word => word.word === NE_WORD.word) ? previous : [...previous, NE_WORD]);
+    setNeWrong(false);
+    speak('네', 'bella', () => {
+      stopGardenAmbience();
+      onComplete();
+    });
+  };
+
+  const handleChoiceSubmit = (useCorrectAnswer = false) => {
     const normalizedInput = stripAccents(typingInput.toLowerCase().trim());
-    const shortcutMatch = isSkipAnswer(typingInput) ? CHOICES.find(c => c.correct) ?? null : null;
-    const match = shortcutMatch ?? CHOICES.find(c => stripAccents(c.prompt) === normalizedInput) ?? null;
+    const shortcutMatch = useCorrectAnswer || isSkipAnswer(typingInput) ? CHOICES.find(c => c.correct) ?? null : null;
+    const romanisationMatch = showWordPuzzleRomanisation && normalizedInput.replace(/[^a-z]/g, '') === 'aiseukeurim'
+      ? CHOICES.find(c => c.correct) ?? null
+      : null;
+    const match = shortcutMatch ?? romanisationMatch ?? CHOICES.find(c => stripAccents(c.prompt) === normalizedInput) ?? null;
     if (match) {
       setTypingInput('');
       if (match.correct) {
@@ -418,13 +499,12 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         setSpeakingChoice(match);
         setUnlockedWords(previous => {
           const existing = new Set(previous.map(word => word.word));
-          return [...previous, ...(match.wordTooltips || []).filter(word => word.word === 'ice cream?' && !existing.has(word.word))];
+          return [...previous, ...(match.wordTooltips || []).filter(word => word.word === '아이스크림?' && !existing.has(word.word))];
         });
-        speak(match.prompt, 'male', () => {
-          setSpeakingChoice(null);
-          setChosenOption(match);
-          setTimeout(() => speak(match.responseIt, 'bella'), 300);
-        });
+        speak(match.prompt, 'josh', finishSpeakingChoice);
+        // A cached or interrupted browser audio element does not always emit
+        // `ended`. Never leave Scene One trapped on Josh's speaking panel.
+        window.setTimeout(finishSpeakingChoice, 2500);
       } else {
         setShowWordPuzzle(false);
         setShowWorried(false);
@@ -476,7 +556,8 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
       onClick={() => {
         // Browsers permit unmuted ambience after this direct player action.
         gardenAudioRef.current?.play().catch(() => { /* the next click can retry */ });
-        if (!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried) advance();
+        if (speakingChoice) { cancel(); finishSpeakingChoice(); return; }
+        if (!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried && !showNeTask) advance();
       }}
     >
       <div
@@ -484,10 +565,10 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         className="relative h-full w-full"
         onMouseMove={handleSceneMouseMove}
       >
-        <img
-          src={visibleSceneImage}
+        <SmoothSceneImage
+          src={currentScene.image}
           alt="Backyard scene"
-          className="absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-700"
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
           draggable={false}
         />
         <audio
@@ -513,7 +594,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                 Il Giardino — The Backyard
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="scene-native-controls flex items-center gap-2">
               <button
                 onClick={toggleSpeech}
                 className="w-9 h-9 rounded-full flex items-center justify-center bg-black/60 border border-white/20 hover:border-white/50 text-white/80 hover:text-white transition-all"
@@ -531,7 +612,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
           </div>
         </div>
 
-        {unlockedWords.length > 0 && (
+        {false && unlockedWords.length > 0 && (
           <div className="absolute left-4 top-28 z-30" onClick={e => e.stopPropagation()}>
             <button
               onClick={() => setWordLibraryOpen(open => !open)}
@@ -571,18 +652,18 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
         {practiceWord && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/50 p-5" onClick={() => setPracticeWord(null)}>
-            <div className="w-full max-w-sm rounded-2xl border border-white/15 bg-[#120d08]/95 p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div data-task-editor-panel="backyard-word-practice" className="w-full max-w-sm rounded-2xl border border-white/15 bg-[#120d08]/95 p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
               <div className="mb-1 text-[10px] uppercase tracking-wider text-[#c4942a]">Practice word</div>
-              <h2 className="text-2xl text-white" style={{ fontFamily: "'Playfair Display', serif" }}>{practiceWord.word}</h2>
+              <h2 className="text-2xl text-white" style={{ fontFamily: "'Playfair Display', serif" }}><LiveAnswerLetters target={capitaliseStandalone(practiceWord.word)} value={practiceInput} neutralClassName="text-white" /></h2>
               <p className="mb-4 text-sm text-white/55">{practiceWord.translation}</p>
               {practiceCorrect ? (
                 <p className="mb-4 text-sm text-green-400">Correct. The word is yours.</p>
-              ) : (
+              ) : (<>
                 <form onSubmit={e => { e.preventDefault(); setPracticeCorrect(stripAccents(practiceInput.trim().toLowerCase()) === stripAccents(practiceWord.word.toLowerCase())); }} className="flex gap-2">
                   <input autoFocus value={practiceInput} onChange={e => setPracticeInput(e.target.value)} placeholder="type the English word" className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-white/60" />
                   <button className="rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-xs uppercase tracking-wider text-white">Check</button>
                 </form>
-              )}
+              </>)}
               <button onClick={() => setPracticeWord(null)} className="mt-4 text-xs text-white/50 hover:text-white">Close</button>
             </div>
           </div>
@@ -590,11 +671,11 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
         {showStandUpPuzzle && !chosenOption && (
           <div className="absolute inset-0 z-30 flex items-end justify-center bg-black/35 p-5 pb-10" onClick={event => event.stopPropagation()}>
-            <form onSubmit={event => { event.preventDefault(); handleStandUpSubmit(); }} className="w-full max-w-lg rounded-2xl border border-[#c4942a]/50 bg-[#120d08]/95 p-5 shadow-2xl">
+            <form data-task-editor-panel="backyard-stand-up" onSubmit={event => { event.preventDefault(); handleStandUpSubmit(); }} className="w-full max-w-lg rounded-2xl border border-[#c4942a]/50 bg-[#120d08]/95 p-5 shadow-2xl">
               <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#e9bd60]">Your action</div>
               <h2 className="text-2xl text-white" style={{ fontFamily: "'Playfair Display', serif" }}>What does Joshua do?</h2>
               <p className="mt-1 text-sm text-white/60">Type the English words to make him get out of the hammock.</p>
-              <div className="mt-4 rounded-lg bg-white/5 px-3 py-2 text-xl font-medium text-white">stand up</div>
+              <div className="mt-4 rounded-lg bg-white/5 px-3 py-2 text-xl font-medium"><LiveAnswerLetters target="Stand up" value={standUpInput} neutralClassName="text-white" /></div>
               <div className="mt-3 flex gap-2">
                 <input autoFocus value={standUpInput} onChange={event => setStandUpInput(event.target.value)} placeholder="type the English words" className="min-w-0 flex-1 rounded-lg border border-white/20 bg-black/35 px-3 py-2.5 text-white outline-none focus:border-[#e9bd60]" />
                 <button className="rounded-lg bg-[#c4942a] px-4 py-2 text-sm font-semibold text-black transition hover:bg-[#e9bd60]">Stand up</button>
@@ -605,7 +686,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         )}
 
         {/* Cinematic dialogue bar */}
-        {!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried && !speakingChoice && (
+        {!showChoices && !chosenOption && !showWordPuzzle && !showStandUpPuzzle && !showWorried && !showNeTask && !speakingChoice && (
           <div className="absolute bottom-0 left-0 right-0 z-20">
             <div className="px-6 pb-5 pt-8" style={{ background: 'linear-gradient(0deg, rgba(8,27,67,0.34) 0%, rgba(8,27,67,0.12) 70%, transparent 100%)' }}>
               <div className="max-w-lg mx-auto">
@@ -621,29 +702,19 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                   </span>
                 </div>
 
-                {isGirlScene && currentScene.text === 'I am unhappy.' ? (
+                {isGirlScene && currentScene.text === '저는 슬퍼요.' ? (
                   <div className="mb-2">
                     <p className="text-white text-2xl leading-snug" style={{ fontFamily: "'Playfair Display', serif" }}>
                       {GIRL_WORDS.map((w, i) => (
                         <span key={i}>
-                          <span
-                            className="relative inline-block cursor-pointer underline decoration-dotted decoration-white/40 underline-offset-4"
-                            onClick={(e) => { e.stopPropagation(); setClickedWord(clickedWord === i ? null : i); }}
-                            onMouseEnter={() => setHoveredWord(i)}
-                            onMouseLeave={() => setHoveredWord(null)}
-                          >
+                          <span className="relative inline-block cursor-help underline decoration-dotted decoration-white/40 underline-offset-4">
                             {w.word}
-                            {(hoveredWord === i || clickedWord === i) && (
-                              <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 rounded-lg bg-white text-black text-xs font-medium whitespace-nowrap z-50 shadow-xl" style={{ pointerEvents: clickedWord === i ? 'auto' : 'none' }}>
-                                {w.word} = {w.translation}
-                              </span>
-                            )}
                           </span>
                           {i < GIRL_WORDS.length - 1 ? '\u00A0' : ''}
                         </span>
                       ))}
                     </p>
-                    <p className="text-white/50 text-sm italic mt-1">我不开心</p>
+                    <p className="text-white/50 text-sm italic mt-1">I am unhappy.</p>
                   </div>
                 ) : (
                   <p className="text-white text-2xl leading-snug" style={{ fontFamily: "'Playfair Display', serif" }}>
@@ -669,9 +740,8 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
         {/* "Sono infelice" word typing puzzle */}
         {showWordPuzzle && !chosenOption && (
-          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-20" onClick={(e) => e.stopPropagation()}>
-            <div className="rounded-2xl border border-white/10 px-4 pb-3 pt-3" style={{ background: 'rgba(0,0,0,0.92)' }}>
-              <div className="max-w-lg mx-auto">
+          <div className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-20 w-[min(30rem,calc(100%-2rem))] -translate-x-1/2" onClick={(e) => e.stopPropagation()}>
+            <div data-task-editor-panel="backyard-unhappy-words" className="shop-task-box shared-task-bar-ui relative px-4 pb-3 pt-3">
                 {wordPuzzleDone ? (
                   <div className="text-center py-4">
                     <div className="flex items-center justify-center gap-2 text-green-400 mb-2">
@@ -680,21 +750,18 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                       <Sparkles size={20} />
                     </div>
                     <p className="text-white/60 text-sm">
-                      <span className="text-green-400 font-medium">I am</span> = <span className="text-green-400">我是</span> &nbsp;·&nbsp;
-                      <span className="text-green-400 font-medium">unhappy</span> = <span className="text-green-400">不开心</span>
+                      <span className="text-green-400 font-medium">저는</span> = <span className="text-green-400">I am</span> &nbsp;·&nbsp;
+                      <span className="text-green-400 font-medium">슬퍼요</span> = <span className="text-green-400">unhappy</span>
                     </p>
                   </div>
                 ) : (
                   <>
-                    <div className="flex items-center gap-2 mb-2">
-                      <div className="w-2 h-2 rounded-full bg-[#e8a59c] flex-shrink-0" />
-                      <span className="text-[#e8a59c] text-[9px] uppercase tracking-[0.12em] font-semibold">{isChinese ? '贝拉在哭——输入她说的话' : 'Bella is crying — type what she says'}</span>
+                    <div data-task-editor-item="instruction" className="flex w-fit items-center gap-2 mb-1">
+                      <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
+                      <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">Type the Korean words using the keyboard</span>
                     </div>
-
-                    {/* Target words with per-letter green highlighting */}
-                    <div className="bg-white/5 rounded-lg px-3 py-2 mb-2">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-white/50 text-[10px]">{isChinese ? '贝拉：' : 'Bella:'}</span>
+                    <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">I am unhappy</p>
+                    <div data-task-editor-item="hangul-cue" className="my-2 flex w-fit items-center gap-2 text-2xl font-semibold tracking-[0.12em]">
                         {(() => {
                           const { wordStates } = getWordPuzzleMatchState();
                           return SONO_INFELICE_WORDS.map((wt, wi) => {
@@ -703,44 +770,26 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                             return (
                               <span key={wi}>
                                 <span className="relative inline-block">
-                                  <span className="underline decoration-dotted decoration-white/30 underline-offset-2">
                                     {letters.map((letter, li) => (
                                       <span
                                         key={li}
                                         className={`transition-colors ${
-                                          ws && li < ws.matchedLetters ? 'text-green-400' : 'text-white/90'
+                                          !/[a-z]/i.test(wordPuzzleInput) && ws && li < ws.matchedLetters ? 'text-green-400' : 'text-white/90'
                                         }`}
                                       >
                                         {letter}
                                       </span>
                                     ))}
-                                  </span>
                                 </span>
                                 {wi < SONO_INFELICE_WORDS.length - 1 ? '\u00A0' : ''}
                               </span>
                             );
                           });
                         })()}
-                      </div>
-                      {/* English translation underneath, green when matched */}
-                      <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        {(() => {
-                          const { wordStates } = getWordPuzzleMatchState();
-                          return SONO_INFELICE_WORDS.map((wt, ewi) => (
-                            <span
-                              key={ewi}
-                              className={`text-[10px] transition-colors ${
-                                wordStates[ewi]?.isComplete ? 'text-green-400' : 'text-white/40'
-                              }`}
-                            >
-                              {wt.translation}{ewi < SONO_INFELICE_WORDS.length - 1 ? '\u00A0' : ''}
-                            </span>
-                          ));
-                        })()}
-                      </div>
+                      <button type="button" onClick={() => speak('저는 슬퍼요', 'bella')} title="Listen" className="text-[#f6d46b] hover:text-white"><Volume2 size={19} /></button>
                     </div>
-
-                    <div className="flex items-center gap-2">
+                    {showWordPuzzleRomanisation && <div data-task-editor-item="romanisation-cue" className="mb-2 w-fit text-sm font-semibold tracking-wide"><LiveAnswerLetters target="Jeoneun Seulpeoyo" value={/[a-z]/i.test(wordPuzzleInput) ? wordPuzzleInput : ''} neutralClassName="text-[#f6d46b]" /></div>}
+                    <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
                       <input
                         value={wordPuzzleInput}
                         onChange={(e) => setWordPuzzleInput(e.target.value)}
@@ -748,7 +797,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                         className="flex-1 bg-white/5 text-white text-xs outline-none placeholder-white/30 caret-white min-w-0 border-b border-white/20 focus:border-white/60 py-1.5 rounded-lg px-2"
                         autoComplete="off"
                         spellCheck={false}
-                        placeholder="type what bella says..."
+                        placeholder="Type the Korean words..."
                         autoFocus
                       />
                       <button
@@ -765,8 +814,18 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                     )}
                   </>
                 )}
-              </div>
             </div>
+          </div>
+        )}
+
+        {showFirstTaskTutorial && showWordPuzzle && !wordPuzzleDone && (
+          <div className="absolute inset-0 z-50 grid place-items-center bg-black/55 px-5 backdrop-blur-[2px]" onClick={event => event.stopPropagation()}>
+            <section className="shop-task-box shared-task-bar-ui w-full max-w-lg px-6 py-6 text-left shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="first-task-tutorial-title">
+              <div className="mb-2 text-[10px] font-bold uppercase tracking-[.18em] text-[#f6d46b]">First task tutorial</div>
+              <h2 id="first-task-tutorial-title" className="text-2xl text-white" style={{ fontFamily: "'Playfair Display', serif" }}>Welcome to your first task</h2>
+              <p className="mt-3 text-sm leading-relaxed text-white/75">Here, you’ll become accustomed to words that you will need to progress. Hover over the words for more detailed definitions. These words will then be saved to your Collection!</p>
+              <button type="button" onClick={dismissFirstTaskTutorial} className="mt-5 rounded-xl border border-[#f6d46b] bg-[#d6a52c] px-5 py-2.5 text-sm font-bold text-[#191207] transition hover:bg-[#f6d46b]">Continue to task</button>
+            </section>
           </div>
         )}
 
@@ -791,90 +850,21 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         )}
 
         {/* Choice typing area */}
-        {showChoices && !chosenOption && (
-          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-20" onClick={(e) => e.stopPropagation()}>
-            <div className="rounded-2xl border border-white/10 px-3 pb-2 pt-2" style={{ background: 'rgba(0,0,0,0.92)' }}>
-              <div className="max-w-lg mx-auto">
-                <div className="flex items-center gap-2 mb-1">
-                  <div className="w-2 h-2 rounded-full bg-[#c4942a] flex-shrink-0" />
-                  <span className="text-[#c4942a] text-[9px] uppercase tracking-[0.12em] font-semibold">{isChinese ? '你会怎么做？' : 'What do you do?'}</span>
+        {showChoices && !chosenOption && !speakingChoice && (
+          <div className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-20 w-[min(30rem,calc(100%-2rem))] -translate-x-1/2" onClick={(e) => e.stopPropagation()}>
+            <div data-task-editor-panel="backyard-choice" className="shop-task-box shared-task-bar-ui px-4 pb-3 pt-3">
+                <div data-task-editor-item="instruction" className="mb-1 flex w-fit items-center gap-2">
+                  <div className="h-2 w-2 flex-shrink-0 rounded-full bg-[#c4942a]" />
+                  <span className="text-[9px] font-semibold uppercase tracking-[0.12em] text-[#c4942a]">{isChinese ? '你会怎么做？' : 'What do you do?'}</span>
                 </div>
-                <p className="text-white/80 text-xs mb-1.5">{isChinese ? '贝拉在哭。试着输入你想给她买的东西：' : 'Bella is crying. Try typing something to buy for her:'}</p>
-
-                <div className="flex flex-col gap-1 mb-2">
-                  {CHOICES.map((c) => {
-                    const { wordStates, isFullMatch } = getWordMatchState(c);
-                    return (
-                      <div
-                        key={c.id}
-                        className={`px-3 py-1 rounded-lg bg-white/5 border transition-all ${
-                          isFullMatch ? 'border-green-400/60 bg-green-400/10' : 'border-white/15'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
-                            isFullMatch ? 'bg-green-400/30 text-green-300' : 'bg-white/10 text-white/60'
-                          }`}>
-                            {CHOICES.indexOf(c) + 1}
-                          </span>
-                          <div className="flex flex-col">
-                            {/* Italian with per-letter green highlighting */}
-                            <span className="text-xs">
-                              {c.wordTooltips?.map((wt, wi) => {
-                                const ws = wordStates[wi];
-                                const letters = wt.word.split('');
-                                return (
-                                  <span key={wi}>
-                                    <span
-                                      className="relative inline-block cursor-pointer"
-                                      onClick={(e) => { e.stopPropagation(); setClickedChoiceWord(clickedChoiceWord === `${c.id}-${wi}` ? null : `${c.id}-${wi}`); }}
-                                      onMouseEnter={() => setHoveredChoiceWord(`${c.id}-${wi}`)}
-                                      onMouseLeave={() => setHoveredChoiceWord(null)}
-                                    >
-                                      <span className="underline decoration-dotted decoration-white/30 underline-offset-2">
-                                        {letters.map((letter, li) => (
-                                          <span
-                                            key={li}
-                                            className={`transition-colors ${
-                                              ws && li < ws.matchedLetters ? 'text-green-400' : 'text-white/90'
-                                            }`}
-                                          >
-                                            {letter}
-                                          </span>
-                                        ))}
-                                      </span>
-                                      {(hoveredChoiceWord === `${c.id}-${wi}` || clickedChoiceWord === `${c.id}-${wi}`) && (
-                                        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 rounded-lg bg-white text-black text-xs font-medium whitespace-nowrap z-50 shadow-xl" style={{ pointerEvents: clickedChoiceWord === `${c.id}-${wi}` ? 'auto' : 'none' }}>
-                                          {wt.word} = {wt.translation}
-                                        </span>
-                                      )}
-                                    </span>
-                                    {wi < (c.wordTooltips!.length - 1) ? '\u00A0' : ''}
-                                  </span>
-                                );
-                              })}
-                            </span>
-                            {/* English underneath — full translation per Italian word, green when matched */}
-                            <span className="text-[10px] mt-0.5">
-                              {c.wordTooltips?.map((wt, ewi) => (
-                                <span
-                                  key={ewi}
-                                  className={`transition-colors ${
-                                    wordStates[ewi]?.isComplete ? 'text-green-400' : 'text-white/40'
-                                  }`}
-                                >
-                                  {wt.translation}{ewi < (c.wordTooltips!.length - 1) ? '\u00A0' : ''}
-                                </span>
-                              ))}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="flex items-center gap-2">
+                <p data-task-editor-item="prompt" className="mt-1 text-sm text-white/60">{isChinese ? '贝拉在哭。输入你想给她买的东西。' : 'Bella is crying. Type what you would like to buy for her.'}</p>
+                <button data-task-editor-item="hangul-cue" type="button" onClick={() => speak('아이스크림?', 'josh')} className="my-2 flex w-fit items-center gap-2 text-2xl font-semibold tracking-[.08em] text-white">
+                  <LiveAnswerLetters target="아이스크림?" value={/[가-힣]/.test(typingInput) ? typingInput : ''} neutralClassName="text-white" />
+                  <Volume2 size={19} className="text-[#f6d46b]" />
+                </button>
+                {showWordPuzzleRomanisation && <p data-task-editor-item="romanisation-cue" className="mb-1 w-fit text-sm font-semibold tracking-wide"><LiveAnswerLetters target="Aiseukeurim?" value={/[a-z]/i.test(typingInput) ? typingInput : ''} neutralClassName="text-[#f6d46b]" /></p>}
+                <p data-task-editor-item="english-cue" className="mb-2 text-sm text-white/60">Ice cream?</p>
+                <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
                   <input
                     value={typingInput}
                     onChange={(e) => setTypingInput(e.target.value)}
@@ -882,22 +872,34 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
                     className="flex-1 bg-white/5 text-white text-xs outline-none placeholder-white/30 caret-white min-w-0 border-b border-white/20 focus:border-white/60 py-1.5 rounded-lg px-2"
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder={isChinese ? '输入你的选择…' : 'type your choice...'}
+                    placeholder={isChinese ? '输入韩语单词…' : 'Type the Korean word...'}
                     autoFocus
                   />
                   <button
-                    onClick={handleChoiceSubmit}
+                    onClick={() => handleChoiceSubmit()}
                     className="bg-white/10 hover:bg-white/20 border border-white/20 hover:border-white/40 text-white text-xs px-4 py-2 rounded-lg transition-all uppercase tracking-wider flex-shrink-0"
                   >
                     {isChinese ? '确认' : 'Enter'}
                   </button>
                 </div>
                 {typingWrong && (
-                  <div className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
-                    <AlertTriangle size={11} /> Not a valid choice — type one of the options above
+                  <div data-task-editor-item="error-message" className="flex items-center gap-1.5 text-red-400 text-xs mt-2">
+                    <AlertTriangle size={11} /> Try again — type the Korean word shown above
                   </div>
                 )}
-              </div>
+            </div>
+          </div>
+        )}
+
+        {showNeTask && (
+          <div className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-20 w-[min(30rem,calc(100%-2rem))] -translate-x-1/2" onClick={(event) => event.stopPropagation()}>
+            <div data-task-editor-panel="backyard-ne-response" className="shop-task-box shared-task-bar-ui relative px-4 pb-3 pt-3">
+              <div data-task-editor-item="instruction" className="flex w-fit items-center gap-2 mb-1"><div className="h-2 w-2 flex-shrink-0 rounded-full bg-[#c4942a]" /><span className="text-[9px] font-semibold uppercase tracking-[0.12em] text-[#c4942a]">Bella replies — type what she says</span></div>
+              <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">Yes / OK</p>
+              <div data-task-editor-item="hangul-cue" className="my-2 flex w-fit items-center gap-2 text-2xl font-semibold"><LiveAnswerLetters target="네" value={/[가-힣]/.test(neInput) ? neInput : ''} neutralClassName="text-white" /><button type="button" onClick={() => speak('네', 'bella')} className="text-[#f6d46b] hover:text-white" aria-label="Hear 네"><Volume2 size={19} /></button></div>
+              {showWordPuzzleRomanisation && <p data-task-editor-item="romanisation-cue" className="mb-2 w-fit text-sm font-semibold"><LiveAnswerLetters target="Ne" value={/[a-z]/i.test(neInput) ? neInput : ''} neutralClassName="text-[#f6d46b]" /></p>}
+              <form data-task-editor-item="answer-form" className="flex w-full gap-2" onSubmit={(event) => { event.preventDefault(); completeNeTask(); }}><input autoFocus value={neInput} onChange={event => setNeInput(event.target.value)} placeholder="Type the Korean word..." className="min-w-0 flex-1 rounded-lg border-b border-white/20 bg-white/5 px-3 py-2 text-sm text-white outline-none" /><button className="rounded-lg border border-white/20 bg-white/10 px-4 text-xs uppercase tracking-wider text-white">Enter</button></form>
+              {neWrong && <p data-task-editor-item="error-message" className="mt-2 text-xs text-red-400">Not quite — listen to Bella and try again.</p>}
             </div>
           </div>
         )}
@@ -1009,22 +1011,23 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
 
         {/* Speaking choice — Josh says the line, then Bella responds */}
         {speakingChoice && !chosenOption && (
-          <div className="absolute left-[2.7%] right-[9.6%] bottom-[1%] z-20" onClick={(e) => e.stopPropagation()}>
-            <div className="rounded-2xl border border-blue-400/30 px-4 pb-3 pt-3" style={{ background: 'rgba(0,0,0,0.92)' }}>
-              <div className="flex items-center gap-2.5 mb-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-blue-400 flex-shrink-0 animate-pulse" />
-                <span className="text-[11px] uppercase tracking-[0.2em] font-semibold text-blue-300">{isChinese ? '乔希正在说话…' : 'Josh is speaking...'}</span>
+          <section className="story-dialogue-panel absolute z-20" onClick={(event) => { event.stopPropagation(); cancel(); finishSpeakingChoice(); }}>
+            <div className="story-dialogue-content">
+              <div className="scene-eyebrow"><span className="cop-narrator-dot bg-blue-400" />{isChinese ? '乔希' : 'Josh'}</div>
+              <p className="story-dialogue-text">{speakingChoice.italianLabel}</p>
+              <p className="mt-1 text-sm italic text-white/55">{speakingChoice.englishLabel}</p>
+              <div className="cop-narration-footer">
+                <span>{isChinese ? '点击任意位置继续' : 'click anywhere to continue'}</span>
+                <button type="button" onClick={(event) => { event.stopPropagation(); speak(speakingChoice.prompt, 'josh', finishSpeakingChoice); }}><Volume2 size={12} /> {isChinese ? '听发音' : 'Listen'}</button>
               </div>
-              <p className="text-white text-lg leading-snug" style={{ fontFamily: "'Playfair Display', serif" }}>{speakingChoice.italianLabel}</p>
-              <p className="text-white/50 text-xs italic mt-1">{speakingChoice.englishLabel}</p>
             </div>
-          </div>
+          </section>
         )}
 
         {/* Result */}
         {chosenOption && (
           chosenOption.correct ? (
-            <img
+            <SmoothSceneImage
               src={assetUrl('scenes/bella/a6.png')}
               alt="Bella happy with gelato"
               className="absolute inset-0 w-full h-full object-cover pointer-events-none transition-opacity duration-700"

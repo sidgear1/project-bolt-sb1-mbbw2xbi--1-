@@ -110,16 +110,6 @@ export default function StoryReferenceOverlay() {
     return () => { observer.disconnect(); window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); };
   }, [enabled]);
 
-  // Text selection should never advance an adventure. This makes dialogue on
-  // every screen copyable directly: select it, then press Ctrl/Cmd+C.
-  useEffect(() => {
-    const stopClickAfterSelection = (event: MouseEvent) => {
-      if (window.getSelection()?.toString().trim()) event.stopPropagation();
-    };
-    window.addEventListener('click', stopClickAfterSelection, true);
-    return () => window.removeEventListener('click', stopClickAfterSelection, true);
-  }, []);
-
   const copyCode = async (code: string) => {
     try {
       await navigator.clipboard.writeText(code);
