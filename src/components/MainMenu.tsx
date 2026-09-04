@@ -89,8 +89,7 @@ const REVISION_ENTRY_IMAGES = [
 ] as const;
 
 function preloadRevisionEntry(priority: "high" | "low" = "high") {
-  const sources = [...new Set([...REVISION_ENTRY_IMAGES, ...Object.values(REVISION_LOCATION_IMAGES)])];
-  return Promise.all(sources.map(source => preloadImage(source, priority)));
+  return Promise.all(REVISION_ENTRY_IMAGES.map(source => preloadImage(source, priority)));
 }
 
 interface MainMenuProps {
@@ -838,10 +837,10 @@ export default function MainMenu({
     };
   }, [homeBackground]);
 
-  // Revision is a bitmap-led full-screen dashboard. Decode its board and all
-  // four card layers while the menu is visible so entering it is immediate.
+  // Warm only the small Revision dashboard set while the menu is idle. The
+  // much larger scene-image library waits until Revision is actually opened.
   useEffect(() => {
-    void preloadRevisionEntry("high");
+    return scheduleIdleImagePreload([...REVISION_ENTRY_IMAGES]);
   }, []);
 
   const keyBufferRef = useRef("");
@@ -1498,6 +1497,10 @@ export default function MainMenu({
   }
 
   function RevisionSection() {
+    useEffect(() => {
+      return scheduleIdleImagePreload([...new Set(Object.values(REVISION_LOCATION_IMAGES))]);
+    }, []);
+
     const playRevisionCardHover = () => {
       if (soundMuted) return;
       try {
@@ -3190,7 +3193,6 @@ function matchShopChoiceInput(
 
 type ShopPhase =
   | "intro"
-  | "bella-excited"
   | "counter"
   | "order"
   | "order-speaking"
@@ -3365,7 +3367,6 @@ function BellaShopAdventure({
   const sceneDialogue = (currentPhase: ShopPhase) => {
     const lines: Partial<Record<ShopPhase, string>> = {
       intro: "At long last he makes it to the ice cream shop. Bella is bursting with excitement.",
-      "bella-excited": "맛있어!",
       counter: "He then moves up to the counter to order.",
       ending: "Bella is happy. He made her day.",
       "phone-call": "And just at that moment he gets a call from his wonderful wife.",
@@ -3397,12 +3398,12 @@ function BellaShopAdventure({
     if (phase === "prego") { speak("천만에요", "shopkeeper"); return; }
     if (phase === "order") { speak(shopKorean(SHOP_CHOICES.find(choice => choice.correct)?.prompt ?? ""), "josh"); return; }
     const dialogue = sceneDialogue(phase);
-    if (dialogue) speak(dialogue, phase === "bella-excited" ? "bella" : "male");
+    if (dialogue) speak(dialogue, "male");
   }, [phase, isChinese, speak]);
 
   const images = BELLA_SHOP_IMAGES;
   const image =
-    phase === "intro" || phase === "bella-excited"
+    phase === "intro"
       ? images[0]
       : phase === "counter" || phase === "order" || phase === "order-speaking"
         ? images[1]
@@ -3420,8 +3421,7 @@ function BellaShopAdventure({
   }, [image]);
 
   const advance = () => {
-    if (phase === "intro") setPhase("bella-excited");
-    else if (phase === "bella-excited") setPhase("counter");
+    if (phase === "intro") setPhase("counter");
     else if (phase === "counter") setPhase("order");
     else if (phase === "ending") setPhase("phone-call");
     else if (phase === "phone-call") setPhase("wife-angry");
@@ -3435,7 +3435,6 @@ function BellaShopAdventure({
 
   const canClick =
     phase === "intro" ||
-    phase === "bella-excited" ||
     phase === "counter" ||
     phase === "ending" ||
     phase === "phone-call" ||
@@ -3605,9 +3604,9 @@ function BellaShopAdventure({
     }
   };
 
-  const isGirl = phase === "bella-excited" || phase === "wife-angry";
+  const isGirl = phase === "wife-angry";
   const dialogueText = sceneDialogue(phase);
-  const speakerName = phase === "bella-excited" ? "Bella" : phase === "wife-angry" ? "Wife" : "Narrator";
+  const speakerName = phase === "wife-angry" ? "Wife" : "Narrator";
   const showDialogue = canClick;
 
   return (
@@ -3800,7 +3799,6 @@ function BellaShopAdventure({
               >
                 {dialogueText}
               </p>
-              {phase === "bella-excited" && <p className="mt-1 text-sm text-white/60">Yum!</p>}
               <div className="cop-narration-footer">
                 <span>{phase === "wife-hangup" ? "click anywhere to return to the map" : "click anywhere to continue"}</span>
                 <button onClick={(event) => { event.stopPropagation(); speak(dialogueText, isGirl ? "bella" : "male"); }}><Volume2 size={12} /> Listen</button>
@@ -3811,7 +3809,7 @@ function BellaShopAdventure({
 
         {phase === "order" && (
           <div
-            className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-10 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2"
+            className="shop-task-frame absolute bottom-[2.5%] left-1/2 z-10 w-[min(36rem,calc(100%-2rem))] -translate-x-1/2"
             onClick={(e) => e.stopPropagation()}
           >
             <div
@@ -3827,68 +3825,13 @@ function BellaShopAdventure({
                   Shopkeeper: Hello! Type what you would like:
                 </span>
               </div>
-              <div className="flex flex-col gap-1 mb-2">
-                {SHOP_CHOICES.map((c) => {
-                  const { wordStates, isFullMatch } = getWordMatchState(c);
-                  return (
-                    <div
-                      key={c.id}
-                      data-task-editor-item={`choice-${c.id}`}
-                      className={`px-3 py-1 rounded-lg bg-white/5 border transition-all ${isFullMatch ? "border-green-400/60 bg-green-400/10" : "border-white/15"}`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${isFullMatch ? "bg-green-400/30 text-green-300" : "bg-white/10 text-white/60"}`}
-                        >
-                          {SHOP_CHOICES.indexOf(c) + 1}
-                        </span>
-                        <div className="flex min-w-0 flex-col gap-0.5">
-                          <span className="text-sm text-white/90">
-                            {c.wordTooltips.map((wt, wi) => {
-                              const ws = wordStates[wi];
-                              const letters = shopKorean(wt.word).split("");
-                              return (
-                                <span key={wi}>
-                                  <span className="underline decoration-dotted decoration-white/30 underline-offset-2">
-                                    {letters.map((letter, li) => (
-                                      <span
-                                        key={li}
-                                        className={`transition-colors ${!/[a-z]/i.test(orderInput) && ws && li < ws.matchedLetters ? "text-green-400" : "text-white/90"}`}
-                                      >
-                                        {letter}
-                                      </span>
-                                    ))}
-                                  </span>
-                                  {wi < c.wordTooltips.length - 1
-                                    ? "\u00A0"
-                                    : ""}
-                                </span>
-                              );
-                            })}
-                          </span>
-                          {shopRomanisationEnabled && (
-                            <span className="text-[11px] text-sky-200">
-                              {c.wordTooltips.map((wt) => capitaliseStandalone(shopRomanisation(wt.word))).join(" ")}
-                            </span>
-                          )}
-                          <span className="text-xs text-white/55">
-                            {c.wordTooltips.map((wt, ewi) => (
-                              <span
-                                key={ewi}
-                                className="text-white/55"
-                              >
-                                {capitaliseStandalone(shopEnglish(wt.word, wt.translation))}
-                                {ewi < c.wordTooltips.length - 1
-                                  ? "\u00A0"
-                                  : ""}
-                              </span>
-                            ))}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div data-task-editor-item="word-cue" className="mb-2 grid justify-items-center text-center">
+                <button type="button" onClick={() => speak(shopKorean("Ice cream please"), "josh")} className="flex items-center gap-2 text-2xl font-semibold tracking-[.08em] text-white">
+                  <LiveAnswerLetters target={shopKorean("Ice cream please")} value={/[가-힣]/.test(orderInput) ? orderInput : ""} neutralClassName="text-white" />
+                  <Volume2 size={19} className="text-[#f6d46b]" />
+                </button>
+                {shopRomanisationEnabled && <p className="mt-1 text-sm font-semibold tracking-wide text-sky-200"><LiveAnswerLetters target={capitaliseStandalone(shopRomanisation("Ice cream please"))} value={/[a-z]/i.test(orderInput) ? orderInput : ""} neutralClassName="text-sky-200" /></p>}
+                <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">Ice cream, please.</p>
               </div>
               <form
                 data-task-editor-item="answer-form"
@@ -3984,29 +3927,12 @@ function BellaShopAdventure({
                       Bella says — type what she says
                     </span>
                   </div>
-                  <div data-task-editor-item="word-cue" className="my-2 w-fit">
-                    <div className="flex items-center gap-2 flex-wrap text-2xl font-semibold tracking-[0.12em]">
-                      <span className="text-white/50 text-[10px]">
-                        Bella:
-                      </span>
-                      {(() => {
-                        const ws = getSimpleMatchState(
-                          grazieInput,
-                          GRAZIE_WORDS,
-                        );
-                        return GRAZIE_WORDS.map((wt, wi) =>
-                          shopKorean(wt.word).split("").map((letter, li) => (
-                            <span
-                              key={li}
-                              className={`transition-colors ${ws[wi] && li < ws[wi].matchedLetters ? "text-green-400" : "text-white/90"} underline decoration-dotted decoration-white/30 underline-offset-2`}
-                            >
-                              {letter}
-                            </span>
-                          )),
-                        );
-                      })()}
-                    </div>
-                    {shopRomanisationEnabled && <p className="mt-1 text-xs text-sky-200">Gamsahamnida</p>}
+                  <div data-task-editor-item="word-cue" className="my-2 grid justify-items-center text-center">
+                    <button type="button" onClick={() => speak(shopKorean("Thank you"), "bella")} className="flex items-center gap-2 text-2xl font-semibold tracking-[.08em] text-white">
+                      <LiveAnswerLetters target={shopKorean("Thank you")} value={/[가-힣]/.test(grazieInput) ? grazieInput : ""} neutralClassName="text-white" />
+                      <Volume2 size={19} className="text-[#f6d46b]" />
+                    </button>
+                    {shopRomanisationEnabled && <p className="mt-1 text-sm font-semibold tracking-wide text-sky-200"><LiveAnswerLetters target="Gamsahamnida" value={/[a-z]/i.test(grazieInput) ? grazieInput : ""} neutralClassName="text-sky-200" /></p>}
                     <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">Thank you</p>
                   </div>
                   <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
@@ -4076,28 +4002,12 @@ function BellaShopAdventure({
                       Shopkeeper says — type what they say
                     </span>
                   </div>
-                  <div data-task-editor-item="word-cue" className="my-2 w-fit">
-                    <div className="flex items-center gap-2 flex-wrap text-2xl font-semibold tracking-[0.12em]">
-                      <span
-                        className={`text-white/50 ${isChinese ? "text-xs" : "text-[10px]"}`}
-                      >
-                        Shopkeeper:
-                      </span>
-                      {(() => {
-                        const ws = getSimpleMatchState(pregoInput, PREGO_WORDS);
-                        return PREGO_WORDS.map((wt, wi) =>
-                          shopKorean(wt.word).split("").map((letter, li) => (
-                            <span
-                              key={li}
-                              className={`transition-colors ${ws[wi] && li < ws[wi].matchedLetters ? "text-green-400" : "text-white/90"} underline decoration-dotted decoration-white/30 underline-offset-2`}
-                            >
-                              {letter}
-                            </span>
-                          )),
-                        );
-                      })()}
-                    </div>
-                    {shopRomanisationEnabled && <p className="mt-1 text-xs text-sky-200">Cheonmaneyo</p>}
+                  <div data-task-editor-item="word-cue" className="my-2 grid justify-items-center text-center">
+                    <button type="button" onClick={() => speak(shopKorean("You are welcome"), "shopkeeper")} className="flex items-center gap-2 text-2xl font-semibold tracking-[.08em] text-white">
+                      <LiveAnswerLetters target={shopKorean("You are welcome")} value={/[가-힣]/.test(pregoInput) ? pregoInput : ""} neutralClassName="text-white" />
+                      <Volume2 size={19} className="text-[#f6d46b]" />
+                    </button>
+                    {shopRomanisationEnabled && <p className="mt-1 text-sm font-semibold tracking-wide text-sky-200"><LiveAnswerLetters target="Cheonmaneyo" value={/[a-z]/i.test(pregoInput) ? pregoInput : ""} neutralClassName="text-sky-200" /></p>}
                     <p data-task-editor-item="english-cue" className="mt-1 text-sm text-white/60">You are welcome</p>
                   </div>
                   <div data-task-editor-item="answer-form" className="flex w-full items-center gap-2">
@@ -4568,7 +4478,7 @@ function RoamSection({ onMenu }: { onMenu: () => void }) {
           className="roam-location-map"
           draggable={false}
         />
-        <video aria-hidden="true" className="hidden" src={ROAM_DESTINATIONS[primedRoamDestination].videos[0]} preload="auto" muted playsInline />
+        <video aria-hidden="true" className="hidden" src={ROAM_DESTINATIONS[primedRoamDestination].videos[0]} preload="metadata" muted playsInline />
         <div className="roam-location-shade" />
         <header className="roam-location-header">
           <div>

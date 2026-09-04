@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useState, Component } from 'react';
+import { useCallback, useEffect, useState, Component, lazy, Suspense } from 'react';
 import { Screen, GamePhase, DictionaryWord } from './types';
 import { SaveSlot, useSave } from './hooks/useSave';
 import { useCafeMusic } from './hooks/useAudio';
-import MainMenu, { type HubSection } from './components/MainMenu';
-import CafeAdventure from './components/adventure test/Game';
-import CatAdventure from './components/CatAdventure';
-import AgentAdventure from './components/AgentAdventure';
+import type { HubSection } from './components/MainMenu';
 import SmoothSceneImage from './components/SmoothSceneImage';
 import { useLanguage } from './i18n';
 import TaskDictionaryOverlay from './components/TaskDictionaryOverlay';
@@ -13,6 +10,11 @@ import KoreanTaskKeyboard from './components/KoreanTaskKeyboard';
 import GlobalKoreanWordGuide from './components/GlobalKoreanWordGuide';
 import { assetUrl } from './utils/assetUrl';
 import { preloadImage, preloadImages, scheduleIdleImagePreload } from './utils/imagePreloader';
+
+const MainMenu = lazy(() => import('./components/MainMenu'));
+const CafeAdventure = lazy(() => import('./components/adventure test/Game'));
+const CatAdventure = lazy(() => import('./components/CatAdventure'));
+const AgentAdventure = lazy(() => import('./components/AgentAdventure'));
 
 interface EBProps { children: React.ReactNode; fallback: React.ReactNode }
 interface EBState { hasError: boolean }
@@ -74,10 +76,6 @@ const previewEntryImage = (() => {
 })();
 const STARTUP_ASSETS = [
   ...LOADING_FRAMES,
-  ...AVATARS,
-  assetUrl('home-wallpapers/learn-english-room.png'),
-  assetUrl('home-wallpapers/watercolor-adventure.png'),
-  assetUrl('home-wallpapers/island-quest.png'),
   assetUrl('home-wallpapers/notebook-adventure-v3.png'),
   ...(previewEntryImage ? [previewEntryImage] : []),
 ];
@@ -102,6 +100,10 @@ function StartupLoading({ onDone }: { onDone: () => void }) {
   }, [onDone]);
   const frame = Math.min(LOADING_FRAMES.length - 1, Math.floor(Math.max(0, progress - 1) / (100 / LOADING_FRAMES.length)));
   return <div className="fixed inset-0 overflow-hidden bg-[#0d0804]" role="progressbar" aria-label="Preparing game" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><SmoothSceneImage src={LOADING_FRAMES[frame]} onError={event => { event.currentTarget.style.visibility = 'hidden'; }} className="absolute inset-0 h-full w-full object-cover" alt={`Loading TaleTalk · ${progress}%`} /></div>;
+}
+
+function SectionLoading() {
+  return <div className="fixed inset-0 overflow-hidden bg-[#0d0804]"><SmoothSceneImage src={LOADING_FRAMES[0]} className="absolute inset-0 h-full w-full object-cover" alt="Loading TaleTalk" /></div>;
 }
 
 function formatPlayTime(seconds: number) {
@@ -240,7 +242,12 @@ export default function App() {
     setGameSession(session => session + 1);
     // Keep the menu painted until the selected adventure has a decoded first
     // frame. Cat, Agent, and the café can therefore never open on black.
-    await preloadImage(adventureEntryImage(adventure, phase), 'high');
+    const adventureModule = adventure === 'tammy'
+      ? import('./components/CatAdventure')
+      : adventure === 'agent'
+        ? import('./components/AgentAdventure')
+        : import('./components/adventure test/Game');
+    await Promise.all([preloadImage(adventureEntryImage(adventure, phase), 'high'), adventureModule]);
     setScreen('game');
   };
 
@@ -262,7 +269,10 @@ export default function App() {
     } else {
       setGameConfig({ phase: 'tied', learnedWords: [], inventory: [], dictionary: [], showIntro: true, xp: 0, combatCleared: false });
     }
-    await preloadImage(adventureEntryImage('cafe', phase), 'high');
+    await Promise.all([
+      preloadImage(adventureEntryImage('cafe', phase), 'high'),
+      import('./components/adventure test/Game'),
+    ]);
     setGameSession(session => session + 1);
     setScreen('game');
   };
@@ -296,13 +306,17 @@ export default function App() {
 
   useEffect(() => {
     if (screen !== 'profiles') return;
-    // Download the menu code and its likely first wallpaper while the player is
-    // choosing a profile, without delaying or competing with the startup screen.
-    return scheduleIdleImagePreload([
+    const cancelImages = scheduleIdleImagePreload([
+      ...AVATARS,
       assetUrl('home-wallpapers/learn-english-room.png'),
       assetUrl('home-wallpapers/watercolor-adventure.png'),
       assetUrl('home-wallpapers/island-quest.png'),
     ]);
+    const menuTimer = window.setTimeout(() => { void import('./components/MainMenu'); }, 350);
+    return () => {
+      cancelImages();
+      window.clearTimeout(menuTimer);
+    };
   }, [screen]);
 
   if (screen === 'loading') return <StartupLoading onDone={finishLoading} />;
@@ -311,7 +325,7 @@ export default function App() {
   if (screen === 'game') {
     const ActiveAdventure = adventureKind === 'tammy' ? CatAdventure : adventureKind === 'agent' ? AgentAdventure : CafeAdventure;
     return (
-      <><ErrorBoundary fallback={
+      <><Suspense fallback={<SectionLoading />}><ErrorBoundary fallback={
         <div className="fixed inset-0 bg-[#0d0804] flex items-center justify-center p-8">
           <div className="text-center">
             <p className="text-[#c4942a] text-lg mb-4">Something went wrong.</p>
@@ -337,9 +351,9 @@ export default function App() {
               return next;
             })}
           />
-      </ErrorBoundary><KoreanTaskKeyboard /><GlobalKoreanWordGuide /></>
+      </ErrorBoundary></Suspense><KoreanTaskKeyboard /><GlobalKoreanWordGuide /></>
     );
   }
 
-  return <><MainMenu initialSection={menuSection} onNewGame={handleNewGame} onStartTammy={() => handleNewGame('tammy')} onStartAgent={() => handleNewGame('agent')} onContinue={handleContinue} onStartAudio={startAudio} onLogout={() => setScreen('profiles')} /><TaskDictionaryOverlay /><KoreanTaskKeyboard /><GlobalKoreanWordGuide /></>;
+  return <><Suspense fallback={<SectionLoading />}><MainMenu initialSection={menuSection} onNewGame={handleNewGame} onStartTammy={() => handleNewGame('tammy')} onStartAgent={() => handleNewGame('agent')} onContinue={handleContinue} onStartAudio={startAudio} onLogout={() => setScreen('profiles')} /></Suspense><TaskDictionaryOverlay /><KoreanTaskKeyboard /><GlobalKoreanWordGuide /></>;
 }

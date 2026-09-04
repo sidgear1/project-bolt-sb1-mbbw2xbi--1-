@@ -116,7 +116,7 @@ const CHOICES: ChoiceOption[] = [
   {
     id: 'gelato',
     italianLabel: '아이스크림?',
-    englishLabel: 'Would you like ice cream?',
+    englishLabel: 'Ice cream?',
     prompt: '아이스크림?',
     correct: true,
     responseIt: '네',
@@ -566,7 +566,7 @@ export default function BackyardAdventure({ onMenu, onComplete }: Props) {
         onMouseMove={handleSceneMouseMove}
       >
         <SmoothSceneImage
-          src={currentScene.image}
+          src={showNeTask ? assetUrl('scenes/bella/a6.png') : currentScene.image}
           alt="Backyard scene"
           className="absolute inset-0 w-full h-full object-cover pointer-events-none"
           draggable={false}
